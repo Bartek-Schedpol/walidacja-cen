@@ -35,11 +35,18 @@ Aplikacja Streamlit do porównywania cen w sklepie WooCommerce z plikiem promo.
 - Przed uruchomieniem otwórz **Advanced settings → Secrets** i wklej:
 
 ```toml
-WC_URL = "https://schedline.pl"
-WC_KEY = "ck_twój_nowy_klucz"
-WC_SECRET = "cs_twój_nowy_secret"
 APP_HASLO = "wspólne_hasło_dla_zespołu"
+
+SCHEDPOL_URL = "https://schedpol.pl"
+SCHEDPOL_KEY = "ck_klucz_schedpol_readonly"
+SCHEDPOL_SECRET = "cs_secret_schedpol"
+
+SCHEDLINE_URL = "https://schedline.pl"
+SCHEDLINE_KEY = "ck_klucz_schedline_readonly"
+SCHEDLINE_SECRET = "cs_secret_schedline"
 ```
+
+> Klucz Read-only generujesz **osobno w każdym sklepie** (WooCommerce → Ustawienia → Zaawansowane → REST API). Jeśli podasz sekrety tylko jednego sklepu — aplikacja pokaże tylko ten sklep.
 
 - Kliknij **Deploy**
 

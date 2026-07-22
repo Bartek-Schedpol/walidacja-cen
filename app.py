@@ -1,31 +1,37 @@
 #!/usr/bin/env python3
 """
-Weryfikator Cen Schedline — aplikacja Streamlit
-================================================
+Weryfikator Cen Schedpol / Schedline — aplikacja Streamlit
+==========================================================
 
-Sprawdza zgodność cen w sklepie WooCommerce (schedline.pl) z wgranym
-plikiem cennika / listy promocyjnej.
+Sprawdza zgodność cen w sklepach WooCommerce (schedpol.pl oraz schedline.pl)
+z wgranym plikiem (CSV / Excel) o DOWOLNEJ budowie.
 
-Funkcje:
-  - logowanie hasłem (wspólne dla zespołu)
-  - upload pliku CSV (WooCommerce) lub XLSX (cennik Schedline / lista promo)
-  - pobranie aktualnych cen ze sklepu przez WooCommerce REST API (tylko odczyt)
-  - porównanie: ceny (Regular / Sale / omnibus), daty promocji, wycofane
-  - raport w tabeli z kolorami + eksport do CSV
+Weryfikuje:
+  - ceny netto  (wyliczane z VAT, jeśli sklep trzyma brutto)
+  - ceny brutto
+  - cenę omnibus (najniższa cena z 30 dni)
+  - daty obowiązywania promocji (od / do)
+  - dodatkowo: logiczne błędy promocji (Omnibus / wygasłe daty / wycofane w promo)
 
-Sekrety (Streamlit → Settings → Secrets):
-    WC_URL    = "https://schedline.pl"
-    WC_KEY    = "ck_..."
-    WC_SECRET = "cs_..."
+Sekrety (Streamlit → Settings → Secrets) — dwa sklepy, klucze Read-only:
     APP_HASLO = "wspolne_haslo_zespolu"
 
+    SCHEDPOL_URL    = "https://schedpol.pl"
+    SCHEDPOL_KEY    = "ck_..."
+    SCHEDPOL_SECRET = "cs_..."
+
+    SCHEDLINE_URL    = "https://schedline.pl"
+    SCHEDLINE_KEY    = "ck_..."
+    SCHEDLINE_SECRET = "cs_..."
+
 Uruchomienie lokalne:
-    pip install streamlit requests pandas openpyxl
+    pip install -r requirements.txt
     streamlit run app.py
 """
 
 import io
 import re
+import datetime as dt
 
 import pandas as pd
 import requests
@@ -37,10 +43,16 @@ import streamlit as st
 # ===========================================================================
 
 st.set_page_config(
-    page_title="Weryfikator Cen Schedline",
+    page_title="Weryfikator Cen Schedpol / Schedline",
     page_icon="🔍",
     layout="wide",
 )
+
+# Definicja sklepów: nazwa -> prefiksy kluczy w Secrets
+SKLEPY = {
+    "schedpol.pl":  {"url": "SCHEDPOL_URL",  "key": "SCHEDPOL_KEY",  "secret": "SCHEDPOL_SECRET"},
+    "schedline.pl": {"url": "SCHEDLINE_URL", "key": "SCHEDLINE_KEY", "secret": "SCHEDLINE_SECRET"},
+}
 
 
 # ===========================================================================
@@ -52,7 +64,7 @@ def sprawdz_haslo():
     if st.session_state.get("zalogowany"):
         return True
 
-    st.title("🔒 Weryfikator Cen Schedline")
+    st.title("🔒 Weryfikator Cen Schedpol / Schedline")
     st.caption("Narzędzie wewnętrzne zespołu Trade / BOK")
 
     haslo = st.text_input("Hasło dostępu", type="password")
@@ -71,19 +83,19 @@ def sprawdz_haslo():
 # ===========================================================================
 
 @st.cache_data(ttl=300, show_spinner=False)
-def pobierz_ceny_ze_sklepu():
+def pobierz_ceny_ze_sklepu(sklep_nazwa):
     """
-    Pobiera wszystkie produkty i warianty ze sklepu.
-    Zwraca słownik {sku: {...ceny...}}.
-    Wynik cache'owany na 5 minut, by nie odpytywać API przy każdym kliknięciu.
+    Pobiera wszystkie produkty i warianty z jednego sklepu.
+    Zwraca słownik {sku: {...ceny surowe...}}.
+    Cache 5 min — nie odpytujemy API przy każdym kliknięciu.
     """
-    url    = st.secrets["WC_URL"].rstrip("/")
-    key    = st.secrets["WC_KEY"]
-    secret = st.secrets["WC_SECRET"]
+    cfg = SKLEPY[sklep_nazwa]
+    url    = st.secrets[cfg["url"]].rstrip("/")
+    key    = st.secrets[cfg["key"]]
+    secret = st.secrets[cfg["secret"]]
 
     def fetch_all(endpoint):
-        out = []
-        page = 1
+        out, page = [], 1
         while True:
             resp = requests.get(
                 f"{url}/wp-json/wc/v3/{endpoint}",
@@ -92,9 +104,9 @@ def pobierz_ceny_ze_sklepu():
                 timeout=30,
             )
             if resp.status_code == 401:
-                raise RuntimeError("401 — nieprawidłowe klucze API lub brak uprawnień.")
+                raise RuntimeError(f"[{sklep_nazwa}] 401 — złe klucze API lub brak uprawnień.")
             if resp.status_code != 200:
-                raise RuntimeError(f"API {resp.status_code}: {resp.text[:200]}")
+                raise RuntimeError(f"[{sklep_nazwa}] API {resp.status_code}: {resp.text[:200]}")
             batch = resp.json()
             if not batch:
                 break
@@ -118,20 +130,19 @@ def pobierz_ceny_ze_sklepu():
                 omnibus = num(m.get("value"))
                 break
         return {
-            "id":      obj.get("id"),
-            "nazwa":   obj.get("name") or parent_name,
-            "regular": num(obj.get("regular_price")),
-            "sale":    num(obj.get("sale_price")),
-            "omnibus": omnibus,
-            "on_sale": bool(obj.get("on_sale")),
+            "sklep":     sklep_nazwa,
+            "id":        obj.get("id"),
+            "nazwa":     obj.get("name") or parent_name,
+            "regular":   num(obj.get("regular_price")),
+            "sale":      num(obj.get("sale_price")),
+            "omnibus":   omnibus,
+            "on_sale":   bool(obj.get("on_sale")),
             "date_from": obj.get("date_on_sale_from"),
             "date_to":   obj.get("date_on_sale_to"),
         }
 
-    sklep = {}
-    produkty = fetch_all("products")
-    zmienne = []
-    for p in produkty:
+    sklep, zmienne = {}, []
+    for p in fetch_all("products"):
         sku = (p.get("sku") or "").strip()
         if p.get("type") == "variable":
             zmienne.append((p["id"], p.get("name", "")))
@@ -147,70 +158,141 @@ def pobierz_ceny_ze_sklepu():
     return sklep
 
 
+def pobierz_ze_sklepow(wybrane_sklepy):
+    """Łączy dane z wybranych sklepów. Przy kolizji SKU zachowuje pierwszy
+    trafiony i zapamiętuje, że SKU występuje w kilku sklepach."""
+    polaczony, kolizje = {}, {}
+    for nazwa in wybrane_sklepy:
+        dane = pobierz_ceny_ze_sklepu(nazwa)
+        for sku, rec in dane.items():
+            if sku in polaczony:
+                kolizje.setdefault(sku, {polaczony[sku]["sklep"]}).add(nazwa)
+            else:
+                polaczony[sku] = rec
+    return polaczony, kolizje
+
+
 # ===========================================================================
-# WCZYTYWANIE WGRANEGO PLIKU
+# NETTO / BRUTTO
+# ===========================================================================
+
+def netto_brutto(p, tryb, vat):
+    """Z jednej ceny sklepowej wylicza parę (netto, brutto) wg trybu i VAT."""
+    if p is None:
+        return (None, None)
+    v = 1 + vat / 100.0
+    if tryb == "brutto":          # w sklepie zapisane jest brutto
+        return (round(p / v, 2), round(p, 2))
+    return (round(p, 2), round(p * v, 2))  # zapisane netto -> doliczamy VAT
+
+
+# ===========================================================================
+# WCZYTYWANIE PLIKU O DOWOLNEJ BUDOWIE
 # ===========================================================================
 
 def to_float(v):
+    if v is None:
+        return None
+    s = str(v).strip().replace(" ", "").replace("\xa0", "").replace(",", ".")
+    if s in ("", "nan", "None"):
+        return None
     try:
-        return round(float(str(v).replace(",", ".")), 2)
-    except (TypeError, ValueError):
+        return round(float(s), 2)
+    except ValueError:
         return None
 
 
-def wczytaj_plik(uploaded):
-    """
-    Rozpoznaje typ wgranego pliku i zwraca DataFrame z ujednoliconymi
-    kolumnami: SKU, Regular, Sale, Omnibus, DateFrom, DateTo.
-    Obsługuje CSV (format WooCommerce) — dla XLSX zwraca surowy podgląd.
-    """
+def wczytaj_surowo(uploaded, arkusz=None):
+    """Wczytuje CSV lub Excel jako surowy DataFrame (wszystko jako tekst)."""
     nazwa = uploaded.name.lower()
-
     if nazwa.endswith(".csv"):
-        df = pd.read_csv(uploaded, dtype=str)
-        return _normalizuj_woo_csv(df), df
-
-    elif nazwa.endswith((".xlsx", ".xls")):
-        # Cennik XLSX — złożona struktura, wymaga mapowania per-arkusz.
-        # Tu wczytujemy pierwszy arkusz jako podgląd; pełne mapowanie
-        # cenników odbywa się osobnym skryptem generującym CSV.
-        df = pd.read_excel(uploaded, dtype=str)
-        return None, df
-
-    else:
-        return None, None
+        try:
+            return pd.read_csv(uploaded, dtype=str, sep=None, engine="python")
+        except Exception:
+            uploaded.seek(0)
+            return pd.read_csv(uploaded, dtype=str)
+    return pd.read_excel(uploaded, dtype=str, sheet_name=arkusz or 0)
 
 
-def _normalizuj_woo_csv(df):
-    """Mapuje kolumny WooCommerce CSV na ujednolicony format."""
-    kol = {c.lower().strip(): c for c in df.columns}
+def lista_arkuszy(uploaded):
+    """Zwraca listę arkuszy pliku Excel (pusta dla CSV)."""
+    if uploaded.name.lower().endswith(".csv"):
+        return []
+    try:
+        return pd.ExcelFile(uploaded).sheet_names
+    finally:
+        uploaded.seek(0)
 
-    def znajdz(*warianty):
-        for w in warianty:
-            if w in kol:
-                return kol[w]
-        return None
 
-    c_sku     = znajdz("sku")
-    c_regular = znajdz("regular price", "regular_price")
-    c_sale    = znajdz("sale price", "sale_price")
-    c_omnibus = znajdz("_price-omnibus", "price-omnibus")
-    c_from    = znajdz("sale price dates from", "date_on_sale_from")
-    c_to      = znajdz("sale price dates to", "date_on_sale_to")
+# Pola docelowe + synonimy do auto-wykrywania kolumn
+POLA = {
+    "SKU":            ["sku", "symbol", "indeks", "index", "kod", "kod produktu"],
+    "EAN":            ["ean", "gtin", "kod kreskowy", "barcode"],
+    "Regular netto":  ["regular netto", "cena regularna netto", "netto regularna", "reg netto"],
+    "Regular brutto": ["regular price", "regular brutto", "cena regularna", "cena regularna brutto",
+                       "regularna", "cena katalogowa"],
+    "Sale netto":     ["sale netto", "promo netto", "cena promocyjna netto", "netto promo"],
+    "Sale brutto":    ["sale price", "cena promocyjna", "promo", "promocja", "cena promo",
+                       "sale brutto", "promocyjna brutto"],
+    "Omnibus netto":  ["omnibus netto", "najnizsza netto", "cena 30 dni netto"],
+    "Omnibus brutto": ["_price-omnibus", "price-omnibus", "omnibus", "najnizsza cena",
+                       "najnizsza cena 30 dni", "cena 30 dni", "omnibus brutto"],
+    "Data od":        ["sale price dates from", "data od", "od", "start promocji", "poczatek",
+                       "date from", "obowiazuje od"],
+    "Data do":        ["sale price dates to", "data do", "do", "koniec promocji", "koniec",
+                       "date to", "obowiazuje do"],
+}
 
-    if not c_sku:
-        return None
 
+def _uprosc(s):
+    return re.sub(r"[^a-z0-9]+", " ", str(s).lower()).strip()
+
+
+def auto_mapowanie(kolumny):
+    """Dla każdego pola docelowego proponuje najlepiej pasującą kolumnę pliku."""
+    uproszczone = {k: _uprosc(k) for k in kolumny}
+    wynik = {}
+    for pole, synonimy in POLA.items():
+        trafienie = None
+        for syn in synonimy:
+            su = _uprosc(syn)
+            # 1) dokładne dopasowanie
+            for kol, ku in uproszczone.items():
+                if ku == su:
+                    trafienie = kol
+                    break
+            if trafienie:
+                break
+        if not trafienie:
+            for syn in synonimy:           # 2) dopasowanie "zawiera"
+                su = _uprosc(syn)
+                for kol, ku in uproszczone.items():
+                    if su and su in ku:
+                        trafienie = kol
+                        break
+                if trafienie:
+                    break
+        wynik[pole] = trafienie
+    return wynik
+
+
+def normalizuj(df, mapowanie):
+    """Buduje ujednolicony DataFrame na podstawie mapowania kolumn."""
     out = pd.DataFrame()
-    out["SKU"]     = df[c_sku].astype(str).str.strip()
-    out["Regular"] = df[c_regular].map(to_float) if c_regular else None
-    out["Sale"]    = df[c_sale].map(to_float)    if c_sale    else None
-    out["Omnibus"] = df[c_omnibus].map(to_float) if c_omnibus else None
-    out["DateFrom"] = df[c_from] if c_from else None
-    out["DateTo"]   = df[c_to]   if c_to   else None
+    m = {p: k for p, k in mapowanie.items() if k and k != "—"}
 
-    # tylko wiersze z SKU
-    out = out[out["SKU"].notna() & (out["SKU"] != "") & (out["SKU"] != "nan")]
+    if "SKU" not in m:
+        return None
+    out["SKU"] = df[m["SKU"]].astype(str).str.strip()
+
+    for pole in ("Regular netto", "Regular brutto", "Sale netto", "Sale brutto",
+                 "Omnibus netto", "Omnibus brutto"):
+        out[pole] = df[m[pole]].map(to_float) if pole in m else None
+
+    out["Data od"] = df[m["Data od"]] if "Data od" in m else None
+    out["Data do"] = df[m["Data do"]] if "Data do" in m else None
+
+    out = out[out["SKU"].notna() & ~out["SKU"].isin(["", "nan", "None"])]
     return out.reset_index(drop=True)
 
 
@@ -218,85 +300,115 @@ def _normalizuj_woo_csv(df):
 # PORÓWNANIE
 # ===========================================================================
 
-def porownaj(plik_df, sklep, sprawdz_daty=True):
+def norm_date(v):
+    if v is None or str(v).strip() in ("", "nan", "None", "NaT"):
+        return ""
+    return re.split(r"[T ]", str(v).strip())[0]
+
+
+def porownaj(plik_df, sklep, tryb_vat, vat, tol, sprawdz_daty):
     """Porównuje plik ze sklepem. Zwraca (DataFrame raportu, statystyki)."""
     wiersze = []
     stat = {"zgodne": 0, "roznica": 0, "brak": 0}
-
-    def norm_date(v):
-        if not v or str(v) in ("nan", "None", "NaT"):
-            return ""
-        # ucinamy część czasową i strefę: 2026-08-31T00:00:00 -> 2026-08-31
-        return re.split(r"[T ]", str(v))[0]
+    dzis = dt.date.today()
 
     for _, r in plik_df.iterrows():
         sku = r["SKU"]
-
         if sku not in sklep:
-            wiersze.append({
-                "SKU": sku, "Status": "❓ BRAK NA STRONIE",
-                "Pole": "-", "Sklep": "-", "Plik": "-",
-            })
+            wiersze.append({"SKU": sku, "Sklep": "—", "Status": "❓ BRAK NA STRONIE",
+                            "Pole": "-", "Na stronie": "-", "W pliku": "-"})
             stat["brak"] += 1
             continue
 
         s = sklep[sku]
-        problemy = []
+        reg_n, reg_b = netto_brutto(s["regular"], tryb_vat, vat)
+        sal_n, sal_b = netto_brutto(s["sale"],    tryb_vat, vat)
+        omn_n, omn_b = netto_brutto(s["omnibus"], tryb_vat, vat)
 
         pary = [
-            ("Regular", r.get("Regular"), s["regular"]),
-            ("Sale",    r.get("Sale"),    s["sale"]),
-            ("Omnibus", r.get("Omnibus"), s["omnibus"]),
+            ("Regular netto",  r.get("Regular netto"),  reg_n),
+            ("Regular brutto", r.get("Regular brutto"), reg_b),
+            ("Sale netto",     r.get("Sale netto"),     sal_n),
+            ("Sale brutto",    r.get("Sale brutto"),    sal_b),
+            ("Omnibus netto",  r.get("Omnibus netto"),  omn_n),
+            ("Omnibus brutto", r.get("Omnibus brutto"), omn_b),
         ]
-        if sprawdz_daty:
-            pary += [
-                ("Data od", norm_date(r.get("DateFrom")), norm_date(s["date_from"])),
-                ("Data do", norm_date(r.get("DateTo")),   norm_date(s["date_to"])),
-            ]
 
+        problemy = []
         for pole, chce, ma in pary:
-            if pole.startswith("Data"):
-                if chce and ma and chce != ma:
-                    problemy.append((pole, ma, chce))
-            else:
-                if chce is not None and ma is not None and abs(chce - ma) > 0.01:
-                    problemy.append((pole, ma, chce))
-                elif chce is not None and ma is None:
-                    problemy.append((pole, "brak", chce))
+            if chce is None:
+                continue
+            if ma is None:
+                problemy.append((pole, "brak", chce))
+            elif abs(chce - ma) > tol:
+                problemy.append((pole, ma, chce))
 
-        if problemy:
+        if sprawdz_daty:
+            for pole, chce_raw, ma_raw in (
+                ("Data od", r.get("Data od"), s["date_from"]),
+                ("Data do", r.get("Data do"), s["date_to"]),
+            ):
+                chce, ma = norm_date(chce_raw), norm_date(ma_raw)
+                if chce and chce != ma:
+                    problemy.append((pole, ma or "brak", chce))
+
+        # logiczne / prawne kontrole promocji (Omnibus)
+        ostrzez = kontrola_logiki(s, dzis)
+
+        if problemy or ostrzez:
             for pole, ma, chce in problemy:
-                wiersze.append({
-                    "SKU": sku, "Status": "🔴 RÓŻNICA",
-                    "Pole": pole, "Sklep": ma, "Plik": chce,
-                })
-            stat["roznica"] += 1
+                wiersze.append({"SKU": sku, "Sklep": s["sklep"], "Status": "🔴 RÓŻNICA",
+                                "Pole": pole, "Na stronie": ma, "W pliku": chce})
+            for opis in ostrzez:
+                wiersze.append({"SKU": sku, "Sklep": s["sklep"], "Status": "🟠 OSTRZEŻENIE",
+                                "Pole": opis, "Na stronie": "-", "W pliku": "-"})
+            if problemy:
+                stat["roznica"] += 1
+            else:
+                stat["zgodne"] += 1
         else:
-            wiersze.append({
-                "SKU": sku, "Status": "✅ ZGODNE",
-                "Pole": "-", "Sklep": "-", "Plik": "-",
-            })
+            wiersze.append({"SKU": sku, "Sklep": s["sklep"], "Status": "✅ ZGODNE",
+                            "Pole": "-", "Na stronie": "-", "W pliku": "-"})
             stat["zgodne"] += 1
 
     return pd.DataFrame(wiersze), stat
 
 
+def kontrola_logiki(s, dzis):
+    """Wykrywa błędy logiczne/prawne niezależnie od pliku wzorcowego."""
+    ost = []
+    reg, sal, omn = s["regular"], s["sale"], s["omnibus"]
+    if sal is not None and reg is not None and sal >= reg:
+        ost.append("promocja nie jest tańsza od ceny regularnej")
+    if omn is not None and reg is not None and omn > reg + 0.01:
+        ost.append("omnibus wyższy od ceny regularnej")
+    if s["on_sale"] and omn is None:
+        ost.append("promocja aktywna, brak ceny omnibus (wymóg prawny)")
+    dt_do = norm_date(s["date_to"])
+    if s["on_sale"] and dt_do:
+        try:
+            if dt.date.fromisoformat(dt_do) < dzis:
+                ost.append(f"promocja wciąż aktywna, choć data 'do' minęła ({dt_do})")
+        except ValueError:
+            pass
+    return ost
+
+
 def sprawdz_wycofane(wycofane_df, sklep):
-    """Sprawdza, czy wycofane produkty wciąż mają aktywną promocję."""
+    """Sprawdza, czy wycofane SKU wciąż mają aktywną promocję."""
     wiersze = []
     for _, r in wycofane_df.iterrows():
         sku = r["SKU"]
         if sku in sklep and sklep[sku]["on_sale"]:
-            wiersze.append({
-                "SKU": sku, "Status": "⚠️ WYCOFANY W PROMOCJI",
-                "Pole": "on_sale", "Sklep": "aktywna promocja",
-                "Plik": "powinno być wygaszone",
-            })
+            wiersze.append({"SKU": sku, "Sklep": sklep[sku]["sklep"],
+                            "Status": "⚠️ WYCOFANY W PROMOCJI",
+                            "Pole": "on_sale", "Na stronie": "aktywna promocja",
+                            "W pliku": "powinno być wygaszone"})
     return pd.DataFrame(wiersze)
 
 
 # ===========================================================================
-# KOLOROWANIE TABELI
+# KOLOROWANIE + EKSPORT
 # ===========================================================================
 
 def koloruj(row):
@@ -305,6 +417,8 @@ def koloruj(row):
         kolor = "background-color: #EAF3DE"
     elif "RÓŻNICA" in status:
         kolor = "background-color: #FBE4E4"
+    elif "OSTRZE" in status:
+        kolor = "background-color: #FFF3CD"
     elif "WYCOFANY" in status:
         kolor = "background-color: #FAEEDA"
     else:
@@ -312,108 +426,138 @@ def koloruj(row):
     return [kolor] * len(row)
 
 
+def do_excela(df):
+    buf = io.BytesIO()
+    with pd.ExcelWriter(buf, engine="openpyxl") as w:
+        df.to_excel(w, index=False, sheet_name="Raport")
+    return buf.getvalue()
+
+
 # ===========================================================================
 # GŁÓWNY WIDOK
 # ===========================================================================
 
 def main():
-    st.title("🔍 Weryfikator Cen Schedline")
-    st.caption("Porównuje ceny w sklepie z wgranym plikiem promo / cennikiem")
+    st.title("🔍 Weryfikator Cen Schedpol / Schedline")
+    st.caption("Porównuje ceny w sklepach z wgranym plikiem (CSV / Excel) o dowolnej budowie")
 
     with st.sidebar:
         st.header("Ustawienia")
+
+        dostepne = [n for n, c in SKLEPY.items()
+                    if all(k in st.secrets for k in c.values())]
+        if not dostepne:
+            st.error("Brak skonfigurowanych kluczy sklepów w Secrets.")
+            st.stop()
+        wybrane_sklepy = st.multiselect("Sklepy do sprawdzenia", dostepne, default=dostepne)
+
+        st.divider()
+        tryb_vat = st.radio("Ceny w sklepie zapisane jako", ["brutto", "netto"], index=0,
+                            help="Typowo polski sklep B2C trzyma ceny brutto.")
+        vat = st.number_input("Stawka VAT (%)", value=23.0, step=1.0, min_value=0.0)
+        tol = st.number_input("Tolerancja różnicy (zł)", value=0.01, step=0.01,
+                              min_value=0.0, format="%.2f",
+                              help="Netto liczone z podziału przez VAT — drobne grosze bywają zaokrągleniem.")
         sprawdz_daty = st.checkbox("Sprawdzaj daty promocji", value=True)
+
         st.divider()
-        if st.button("🔄 Odśwież dane ze sklepu"):
+        if st.button("🔄 Odśwież dane ze sklepów"):
             st.cache_data.clear()
-            st.success("Cache wyczyszczony — dane pobiorą się na nowo.")
-        st.divider()
+            st.success("Cache wyczyszczony.")
         if st.button("Wyloguj"):
             st.session_state["zalogowany"] = False
             st.rerun()
 
+    if not wybrane_sklepy:
+        st.warning("Zaznacz przynajmniej jeden sklep w panelu bocznym.")
+        return
+
     col1, col2 = st.columns(2)
     with col1:
-        plik_promo = st.file_uploader(
-            "📄 Plik z cenami promo (CSV WooCommerce)",
-            type=["csv", "xlsx", "xls"],
-        )
+        plik_promo = st.file_uploader("📄 Plik z cenami (CSV / Excel)",
+                                      type=["csv", "xlsx", "xls"])
     with col2:
-        plik_wycofane = st.file_uploader(
-            "🗑️ Lista wycofanych SKU (opcjonalnie, CSV)",
-            type=["csv"],
-        )
+        plik_wycofane = st.file_uploader("🗑️ Lista wycofanych SKU (opcjonalnie)",
+                                         type=["csv", "xlsx", "xls"])
 
     if not plik_promo:
         st.info("⬆️ Wgraj plik z cenami, aby rozpocząć weryfikację.")
         return
 
-    plik_df, surowy = wczytaj_plik(plik_promo)
+    # --- wybór arkusza (Excel) ---
+    arkusze = lista_arkuszy(plik_promo)
+    arkusz = st.selectbox("Arkusz", arkusze) if len(arkusze) > 1 else (arkusze[0] if arkusze else None)
 
-    if plik_df is None:
-        st.warning(
-            "Ten plik to XLSX o złożonej strukturze (cennik). "
-            "Aplikacja porównuje pliki w formacie CSV WooCommerce. "
-            "Najpierw wygeneruj CSV z cennika, a potem wgraj go tutaj."
-        )
-        st.dataframe(surowy.head(20))
+    surowy = wczytaj_surowo(plik_promo, arkusz)
+    st.caption(f"Wczytano {len(surowy)} wierszy, kolumny: {', '.join(map(str, surowy.columns))}")
+
+    # --- mapowanie kolumn ---
+    st.subheader("🧩 Mapowanie kolumn")
+    st.caption("Auto-wykryte poniżej — popraw, jeśli któraś kolumna została źle dopasowana. Myślnik (—) oznacza: pomiń pole.")
+    auto = auto_mapowanie(list(surowy.columns))
+    opcje = ["—"] + list(surowy.columns)
+    mapowanie = {}
+    kolumny_ui = st.columns(3)
+    for i, pole in enumerate(POLA):
+        with kolumny_ui[i % 3]:
+            dom = auto.get(pole)
+            idx = opcje.index(dom) if dom in opcje else 0
+            mapowanie[pole] = st.selectbox(pole, opcje, index=idx, key=f"map_{pole}")
+
+    if mapowanie.get("SKU", "—") == "—":
+        st.error("Musisz wskazać kolumnę SKU — bez niej nie ma jak dopasować produktów.")
         return
 
-    st.success(f"Wczytano {len(plik_df)} produktów z pliku.")
+    plik_df = normalizuj(surowy, mapowanie)
+    st.success(f"Do weryfikacji: {len(plik_df)} produktów z SKU.")
 
     if st.button("▶️ Uruchom weryfikację", type="primary"):
         try:
-            with st.spinner("Pobieram aktualne ceny ze sklepu..."):
-                sklep = pobierz_ceny_ze_sklepu()
+            with st.spinner("Pobieram aktualne ceny ze sklepów..."):
+                sklep, kolizje = pobierz_ze_sklepow(wybrane_sklepy)
         except Exception as e:
             st.error(f"Błąd połączenia ze sklepem: {e}")
             return
 
-        st.caption(f"Pobrano {len(sklep)} SKU ze sklepu.")
+        st.caption(f"Pobrano {len(sklep)} SKU z {len(wybrane_sklepy)} sklepu/ów.")
+        if kolizje:
+            st.warning(f"{len(kolizje)} SKU występuje w obu sklepach — porównano do pierwszego trafionego.")
 
-        raport, stat = porownaj(plik_df, sklep, sprawdz_daty)
+        raport, stat = porownaj(plik_df, sklep, tryb_vat, vat, tol, sprawdz_daty)
 
-        # Wycofane
         raport_wyc = pd.DataFrame()
         if plik_wycofane:
-            wdf, _ = wczytaj_plik(plik_wycofane)
-            if wdf is not None:
+            wsurowy = wczytaj_surowo(plik_wycofane)
+            wmap = auto_mapowanie(list(wsurowy.columns))
+            wdf = normalizuj(wsurowy, wmap)
+            if wdf is not None and len(wdf):
                 raport_wyc = sprawdz_wycofane(wdf, sklep)
 
-        # Podsumowanie
         m1, m2, m3, m4 = st.columns(4)
         m1.metric("✅ Zgodne", stat["zgodne"])
         m2.metric("🔴 Różnice", stat["roznica"])
         m3.metric("❓ Brak na stronie", stat["brak"])
         m4.metric("⚠️ Wycofane w promo", len(raport_wyc))
 
-        # Pełny raport
-        pelny = pd.concat([raport, raport_wyc], ignore_index=True) \
-            if not raport_wyc.empty else raport
+        pelny = pd.concat([raport, raport_wyc], ignore_index=True) if not raport_wyc.empty else raport
 
         st.divider()
         st.subheader("Raport szczegółowy")
-
-        # filtr statusu
         statusy = pelny["Status"].unique().tolist()
         wybrane = st.multiselect("Filtruj status", statusy, default=statusy)
         widok = pelny[pelny["Status"].isin(wybrane)]
 
-        st.dataframe(
-            widok.style.apply(koloruj, axis=1),
-            use_container_width=True,
-            height=500,
-        )
+        st.dataframe(widok.style.apply(koloruj, axis=1),
+                     use_container_width=True, height=500)
 
-        # Eksport
+        c1, c2 = st.columns(2)
         buf = io.StringIO()
         pelny.to_csv(buf, index=False)
-        st.download_button(
-            "💾 Pobierz raport CSV",
-            buf.getvalue(),
-            file_name="raport_weryfikacji.csv",
-            mime="text/csv",
-        )
+        c1.download_button("💾 Pobierz CSV", buf.getvalue(),
+                           file_name="raport_weryfikacji.csv", mime="text/csv")
+        c2.download_button("📊 Pobierz Excel", do_excela(pelny),
+                           file_name="raport_weryfikacji.xlsx",
+                           mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
 
 
 # ===========================================================================
