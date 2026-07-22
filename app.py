@@ -158,6 +158,52 @@ def pobierz_ceny_ze_sklepu(sklep_nazwa):
     return sklep
 
 
+@st.cache_data(ttl=300, show_spinner=False)
+def pobierz_konfig_vat(sklep_nazwa):
+    """
+    Odczytuje z API sklepu: czy ceny są zapisane brutto/netto oraz stawkę VAT.
+    Zwraca {"tryb": "brutto"/"netto"/None, "vat": float/None, "info": str}.
+    Przy braku dostępu (klucz bez uprawnień do ustawień) zwraca None-y —
+    aplikacja użyje wtedy wartości ręcznych.
+    """
+    cfg = SKLEPY[sklep_nazwa]
+    url    = st.secrets[cfg["url"]].rstrip("/")
+    key    = st.secrets[cfg["key"]]
+    secret = st.secrets[cfg["secret"]]
+    tryb, vat, info = None, None, ""
+
+    try:
+        r = requests.get(f"{url}/wp-json/wc/v3/settings/tax",
+                         auth=(key, secret), params={"per_page": 100}, timeout=30)
+        if r.status_code == 200:
+            for s in r.json():
+                if s.get("id") == "woocommerce_prices_include_tax":
+                    tryb = "brutto" if s.get("value") == "yes" else "netto"
+        else:
+            info = f"settings/tax: HTTP {r.status_code}"
+    except Exception as e:
+        info = f"settings/tax: {e}"
+
+    try:
+        r = requests.get(f"{url}/wp-json/wc/v3/taxes",
+                         auth=(key, secret), params={"per_page": 100}, timeout=30)
+        if r.status_code == 200:
+            rates = r.json()
+            std = [t for t in rates if (t.get("class") or "standard") == "standard"]
+            pick = std or rates
+            if pick:
+                try:
+                    vat = round(float(pick[0].get("rate")), 2)
+                except (TypeError, ValueError):
+                    pass
+        else:
+            info = (info + f"; taxes: HTTP {r.status_code}").strip("; ")
+    except Exception as e:
+        info = (info + f"; taxes: {e}").strip("; ")
+
+    return {"tryb": tryb, "vat": vat, "info": info}
+
+
 def pobierz_ze_sklepow(wybrane_sklepy):
     """Łączy dane z wybranych sklepów. Przy kolizji SKU zachowuje pierwszy
     trafiony i zapamiętuje, że SKU występuje w kilku sklepach."""
@@ -306,8 +352,9 @@ def norm_date(v):
     return re.split(r"[T ]", str(v).strip())[0]
 
 
-def porownaj(plik_df, sklep, tryb_vat, vat, tol, sprawdz_daty):
-    """Porównuje plik ze sklepem. Zwraca (DataFrame raportu, statystyki)."""
+def porownaj(plik_df, sklep, vat_map, tol, sprawdz_daty):
+    """Porównuje plik ze sklepem. Zwraca (DataFrame raportu, statystyki).
+    vat_map: {nazwa_sklepu: (tryb, vat)} — konfiguracja VAT osobno per sklep."""
     wiersze = []
     stat = {"zgodne": 0, "roznica": 0, "brak": 0}
     dzis = dt.date.today()
@@ -321,6 +368,7 @@ def porownaj(plik_df, sklep, tryb_vat, vat, tol, sprawdz_daty):
             continue
 
         s = sklep[sku]
+        tryb_vat, vat = vat_map.get(s["sklep"], ("brutto", 23.0))
         reg_n, reg_b = netto_brutto(s["regular"], tryb_vat, vat)
         sal_n, sal_b = netto_brutto(s["sale"],    tryb_vat, vat)
         omn_n, omn_b = netto_brutto(s["omnibus"], tryb_vat, vat)
@@ -452,9 +500,27 @@ def main():
         wybrane_sklepy = st.multiselect("Sklepy do sprawdzenia", dostepne, default=dostepne)
 
         st.divider()
-        tryb_vat = st.radio("Ceny w sklepie zapisane jako", ["brutto", "netto"], index=0,
-                            help="Typowo polski sklep B2C trzyma ceny brutto.")
-        vat = st.number_input("Stawka VAT (%)", value=23.0, step=1.0, min_value=0.0)
+        auto_vat = st.checkbox("Auto-wykryj VAT / brutto z API", value=True,
+                               help="Odczytuje z każdego sklepu: czy ceny są brutto/netto i stawkę VAT.")
+        st.caption("Wartości ręczne (użyte, gdy API nie odda ustawień):")
+        tryb_man = st.radio("Ceny w sklepie zapisane jako", ["brutto", "netto"], index=0)
+        vat_man = st.number_input("Stawka VAT (%)", value=23.0, step=1.0, min_value=0.0)
+
+        vat_map = {}
+        for nazwa in wybrane_sklepy:
+            tryb, vat = tryb_man, vat_man
+            if auto_vat:
+                k = pobierz_konfig_vat(nazwa)
+                if k["tryb"]:
+                    tryb = k["tryb"]
+                if k["vat"] is not None:
+                    vat = k["vat"]
+                if k["tryb"] and k["vat"] is not None:
+                    st.caption(f"✅ {nazwa}: {tryb}, VAT {vat}% (z API)")
+                else:
+                    st.caption(f"⚠️ {nazwa}: brak z API → ręczne ({tryb}, VAT {vat}%)")
+            vat_map[nazwa] = (tryb, vat)
+
         tol = st.number_input("Tolerancja różnicy (zł)", value=0.01, step=0.01,
                               min_value=0.0, format="%.2f",
                               help="Netto liczone z podziału przez VAT — drobne grosze bywają zaokrągleniem.")
@@ -523,7 +589,7 @@ def main():
         if kolizje:
             st.warning(f"{len(kolizje)} SKU występuje w obu sklepach — porównano do pierwszego trafionego.")
 
-        raport, stat = porownaj(plik_df, sklep, tryb_vat, vat, tol, sprawdz_daty)
+        raport, stat = porownaj(plik_df, sklep, vat_map, tol, sprawdz_daty)
 
         raport_wyc = pd.DataFrame()
         if plik_wycofane:
