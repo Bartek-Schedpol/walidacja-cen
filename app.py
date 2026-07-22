@@ -270,23 +270,20 @@ def lista_arkuszy(uploaded):
         uploaded.seek(0)
 
 
-# Pola docelowe + synonimy do auto-wykrywania kolumn
+# Pola docelowe + synonimy do auto-wykrywania kolumn.
+# JEDNA kolumna na typ ceny — bazę (netto/brutto) ustawia się osobnym
+# przełącznikiem „ceny w pliku podane jako", ta sama dla wszystkich cen.
 POLA = {
-    "SKU":            ["sku", "symbol", "indeks", "index", "kod", "kod produktu"],
-    "EAN":            ["ean", "gtin", "kod kreskowy", "barcode"],
-    "Regular netto":  ["regular netto", "cena regularna netto", "netto regularna", "reg netto"],
-    "Regular brutto": ["regular price", "regular brutto", "cena regularna", "cena regularna brutto",
-                       "regularna", "cena katalogowa"],
-    "Sale netto":     ["sale netto", "promo netto", "cena promocyjna netto", "netto promo"],
-    "Sale brutto":    ["sale price", "cena promocyjna", "promo", "promocja", "cena promo",
-                       "sale brutto", "promocyjna brutto"],
-    "Omnibus netto":  ["omnibus netto", "najnizsza netto", "cena 30 dni netto"],
-    "Omnibus brutto": ["_price-omnibus", "price-omnibus", "omnibus", "najnizsza cena",
-                       "najnizsza cena 30 dni", "cena 30 dni", "omnibus brutto"],
-    "Data od":        ["sale price dates from", "data od", "od", "start promocji", "poczatek",
-                       "date from", "obowiazuje od"],
-    "Data do":        ["sale price dates to", "data do", "do", "koniec promocji", "koniec",
-                       "date to", "obowiazuje do"],
+    "SKU":     ["sku", "symbol", "indeks", "index", "kod produktu"],
+    "EAN":     ["ean", "gtin", "kod kreskowy", "barcode"],
+    "Regular": ["regular price", "cena regularna", "regularna", "cena katalogowa"],
+    "Sale":    ["sale price", "cena promocyjna", "cena promo", "promocyjna", "promocja"],
+    "Omnibus": ["_price-omnibus", "price-omnibus", "omnibus", "najnizsza cena 30 dni",
+                "najnizsza cena", "cena 30 dni"],
+    "Data od": ["sale price dates from", "data od", "obowiazuje od", "start promocji",
+                "poczatek promocji", "date from"],
+    "Data do": ["sale price dates to", "data do", "obowiazuje do", "koniec promocji",
+                "date to"],
 }
 
 
@@ -331,8 +328,7 @@ def normalizuj(df, mapowanie):
         return None
     out["SKU"] = df[m["SKU"]].astype(str).str.strip()
 
-    for pole in ("Regular netto", "Regular brutto", "Sale netto", "Sale brutto",
-                 "Omnibus netto", "Omnibus brutto"):
+    for pole in ("Regular", "Sale", "Omnibus"):
         out[pole] = df[m[pole]].map(to_float) if pole in m else None
 
     out["Data od"] = df[m["Data od"]] if "Data od" in m else None
@@ -352,9 +348,12 @@ def norm_date(v):
     return re.split(r"[T ]", str(v).strip())[0]
 
 
-def porownaj(plik_df, sklep, vat_map, tol, sprawdz_daty):
+def porownaj(plik_df, sklep, vat_map, plik_basis, tol, sprawdz_daty):
     """Porównuje plik ze sklepem. Zwraca (DataFrame raportu, statystyki).
-    vat_map: {nazwa_sklepu: (tryb, vat)} — konfiguracja VAT osobno per sklep."""
+    vat_map: {nazwa_sklepu: (tryb, vat)} — konfiguracja VAT osobno per sklep.
+    plik_basis: "brutto"/"netto" — w jakiej bazie są ceny w pliku.
+    Obie strony sprowadzane do brutto; różnica brutto == różnica netto,
+    więc jedna kontrola pokrywa oba (bez ryzyka zdublowania)."""
     wiersze = []
     stat = {"zgodne": 0, "roznica": 0, "brak": 0}
     dzis = dt.date.today()
@@ -369,27 +368,25 @@ def porownaj(plik_df, sklep, vat_map, tol, sprawdz_daty):
 
         s = sklep[sku]
         tryb_vat, vat = vat_map.get(s["sklep"], ("brutto", 23.0))
-        reg_n, reg_b = netto_brutto(s["regular"], tryb_vat, vat)
-        sal_n, sal_b = netto_brutto(s["sale"],    tryb_vat, vat)
-        omn_n, omn_b = netto_brutto(s["omnibus"], tryb_vat, vat)
 
+        # (netto, brutto) — indeks 1 = brutto, na nim porównujemy
         pary = [
-            ("Regular netto",  r.get("Regular netto"),  reg_n),
-            ("Regular brutto", r.get("Regular brutto"), reg_b),
-            ("Sale netto",     r.get("Sale netto"),     sal_n),
-            ("Sale brutto",    r.get("Sale brutto"),    sal_b),
-            ("Omnibus netto",  r.get("Omnibus netto"),  omn_n),
-            ("Omnibus brutto", r.get("Omnibus brutto"), omn_b),
+            ("Regular", netto_brutto(r.get("Regular"), plik_basis, vat),
+                        netto_brutto(s["regular"], tryb_vat, vat)),
+            ("Sale",    netto_brutto(r.get("Sale"), plik_basis, vat),
+                        netto_brutto(s["sale"], tryb_vat, vat)),
+            ("Omnibus", netto_brutto(r.get("Omnibus"), plik_basis, vat),
+                        netto_brutto(s["omnibus"], tryb_vat, vat)),
         ]
 
         problemy = []
-        for pole, chce, ma in pary:
-            if chce is None:
+        for pole, (f_n, f_b), (s_n, s_b) in pary:
+            if f_b is None:                       # pole nie ma go w pliku — pomijamy
                 continue
-            if ma is None:
-                problemy.append((pole, "brak", chce))
-            elif abs(chce - ma) > tol:
-                problemy.append((pole, ma, chce))
+            if s_b is None:
+                problemy.append((pole, "brak", f"{f_b} (n: {f_n})"))
+            elif abs(f_b - s_b) > tol:
+                problemy.append((pole, f"{s_b} (n: {s_n})", f"{f_b} (n: {f_n})"))
 
         if sprawdz_daty:
             for pole, chce_raw, ma_raw in (
@@ -577,6 +574,16 @@ def main():
     plik_df = normalizuj(surowy, mapowanie)
     st.success(f"Do weryfikacji: {len(plik_df)} produktów z SKU.")
 
+    # baza cenowa pliku (netto/brutto) — domyślnie jak wykryty tryb sklepu
+    bazy_sklepow = {t for t, _ in vat_map.values()}
+    dom_basis = list(bazy_sklepow)[0] if len(bazy_sklepow) == 1 else "brutto"
+    plik_basis = st.radio(
+        "Ceny w pliku podane jako", ["brutto", "netto"],
+        index=0 if dom_basis == "brutto" else 1, horizontal=True,
+        help=("W jakiej postaci są kwoty w pliku. Eksport z WooCommerce ma ceny tak jak sklep — "
+              f"tu wykryto: {dom_basis}. Cennik marketingowy B2C to zwykle brutto."),
+    )
+
     if st.button("▶️ Uruchom weryfikację", type="primary"):
         try:
             with st.spinner("Pobieram aktualne ceny ze sklepów..."):
@@ -589,7 +596,7 @@ def main():
         if kolizje:
             st.warning(f"{len(kolizje)} SKU występuje w obu sklepach — porównano do pierwszego trafionego.")
 
-        raport, stat = porownaj(plik_df, sklep, vat_map, tol, sprawdz_daty)
+        raport, stat = porownaj(plik_df, sklep, vat_map, plik_basis, tol, sprawdz_daty)
 
         raport_wyc = pd.DataFrame()
         if plik_wycofane:
