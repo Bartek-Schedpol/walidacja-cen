@@ -150,7 +150,8 @@ def pobierz_ceny_ze_sklepu(sklep_nazwa):
 
     def _get(endpoint, page, fields):
         r = sess.get(f"{url}/wp-json/wc/v3/{endpoint}",
-                     params={"per_page": 100, "page": page, "_fields": fields}, timeout=30)
+                     params={"per_page": 100, "page": page, "_fields": fields,
+                             "status": "any"}, timeout=30)
         if r.status_code == 401:
             raise RuntimeError(f"[{sklep_nazwa}] 401 — złe klucze API lub brak uprawnień.")
         if r.status_code != 200:
@@ -158,15 +159,30 @@ def pobierz_ceny_ze_sklepu(sklep_nazwa):
         return r
 
     def fetch_all(endpoint, fields):
-        """Pobiera stronę 1, potem pozostałe strony równolegle."""
+        """Pobiera wszystkie strony. Jeśli nagłówek X-WP-TotalPages jest wiarygodny —
+        reszta stron równolegle. Jeśli go brak/niepełny (hosting bywa go obcina) —
+        stronicuje sekwencyjnie aż do krótkiej strony (odporne na brak nagłówka)."""
         r = _get(endpoint, 1, fields)
-        out = r.json()
-        total = int(r.headers.get("X-WP-TotalPages", 1))
+        out = list(r.json())
+        try:
+            total = int(r.headers.get("X-WP-TotalPages", 0) or 0)
+        except ValueError:
+            total = 0
         if total > 1:
             with cf.ThreadPoolExecutor(max_workers=8) as ex:
                 for batch in ex.map(lambda p: _get(endpoint, p, fields).json(),
                                     range(2, total + 1)):
                     out.extend(batch)
+        elif len(out) >= 100:                      # nagłówek niewiarygodny — stronicuj do skutku
+            page = 2
+            while True:
+                batch = _get(endpoint, page, fields).json()
+                if not batch:
+                    break
+                out.extend(batch)
+                if len(batch) < 100:
+                    break
+                page += 1
         return out
 
     def num(v):
@@ -592,7 +608,8 @@ def pobierz_audyt_ze_sklepu(sklep_nazwa):
 
     def _get(endpoint, page, fields):
         r = sess.get(f"{url}/wp-json/wc/v3/{endpoint}",
-                     params={"per_page": 100, "page": page, "_fields": fields}, timeout=30)
+                     params={"per_page": 100, "page": page, "_fields": fields,
+                             "status": "any"}, timeout=30)
         if r.status_code == 401:
             raise RuntimeError(f"[{sklep_nazwa}] 401 — złe klucze API lub brak uprawnień.")
         if r.status_code != 200:
@@ -601,12 +618,25 @@ def pobierz_audyt_ze_sklepu(sklep_nazwa):
 
     def fetch_all(endpoint, fields):
         r = _get(endpoint, 1, fields)
-        out = r.json()
-        total = int(r.headers.get("X-WP-TotalPages", 1))
+        out = list(r.json())
+        try:
+            total = int(r.headers.get("X-WP-TotalPages", 0) or 0)
+        except ValueError:
+            total = 0
         if total > 1:
             with cf.ThreadPoolExecutor(max_workers=8) as ex:
                 for b in ex.map(lambda p: _get(endpoint, p, fields).json(), range(2, total + 1)):
                     out.extend(b)
+        elif len(out) >= 100:                      # nagłówek niewiarygodny — stronicuj do skutku
+            page = 2
+            while True:
+                b = _get(endpoint, page, fields).json()
+                if not b:
+                    break
+                out.extend(b)
+                if len(b) < 100:
+                    break
+                page += 1
         return out
 
     def num(v):
@@ -833,7 +863,8 @@ def pobierz_do_eksportu(sklep_nazwa):
 
     def _get(endpoint, page, fields):
         r = sess.get(f"{url}/wp-json/wc/v3/{endpoint}",
-                     params={"per_page": 100, "page": page, "_fields": fields}, timeout=30)
+                     params={"per_page": 100, "page": page, "_fields": fields,
+                             "status": "any"}, timeout=30)
         if r.status_code == 401:
             raise RuntimeError(f"[{sklep_nazwa}] 401 — złe klucze API lub brak uprawnień.")
         if r.status_code != 200:
@@ -842,12 +873,25 @@ def pobierz_do_eksportu(sklep_nazwa):
 
     def fetch_all(endpoint, fields):
         r = _get(endpoint, 1, fields)
-        out = r.json()
-        total = int(r.headers.get("X-WP-TotalPages", 1))
+        out = list(r.json())
+        try:
+            total = int(r.headers.get("X-WP-TotalPages", 0) or 0)
+        except ValueError:
+            total = 0
         if total > 1:
             with cf.ThreadPoolExecutor(max_workers=8) as ex:
                 for b in ex.map(lambda p: _get(endpoint, p, fields).json(), range(2, total + 1)):
                     out.extend(b)
+        elif len(out) >= 100:                      # nagłówek niewiarygodny — stronicuj do skutku
+            page = 2
+            while True:
+                b = _get(endpoint, page, fields).json()
+                if not b:
+                    break
+                out.extend(b)
+                if len(b) < 100:
+                    break
+                page += 1
         return out
 
     def num(v):
@@ -1087,7 +1131,7 @@ def tryb_eksport_zmian(dostepne_sklepy):
         bak = zbuduj_csv_wlasny(backup_map, wpisy)
         st.session_state["eksport"] = {
             "disp": disp, "exp": exp, "bak": bak, "stat": stat,
-            "sklep": sklep_nazwa, "tryb": tryb,
+            "sklep": sklep_nazwa, "tryb": tryb, "pobrano": len(sku_map),
             "czas": dt.datetime.now().strftime("%d.%m.%Y, godz. %H:%M"),
         }
 
@@ -1096,7 +1140,8 @@ def tryb_eksport_zmian(dostepne_sklepy):
         return
 
     st.header("📋 Podgląd zmian (dry-run)")
-    st.caption(f"🕒 {wynik['czas']} · sklep: {wynik['sklep']} · ceny w sklepie: {wynik['tryb']}")
+    st.caption(f"🕒 {wynik['czas']} · sklep: {wynik['sklep']} · ceny w sklepie: {wynik['tryb']} · "
+               f"pobrano {wynik.get('pobrano', 0)} SKU ze sklepu")
     stat = wynik["stat"]
     m1, m2, m3 = st.columns(3)
     m1.metric("🟠 Do zmiany (SKU)", stat["zmiany"])
