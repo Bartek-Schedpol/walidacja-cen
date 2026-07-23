@@ -804,7 +804,7 @@ def main():
         auto_vat = st.checkbox("Auto-wykryj VAT / brutto z API", value=True,
                                help="Odczytuje z każdego sklepu: czy ceny są brutto/netto i stawkę VAT.")
         st.caption("Wartości ręczne (użyte, gdy API nie odda ustawień):")
-        tryb_man = st.radio("Ceny w sklepie zapisane jako", ["brutto", "netto"], index=0)
+        tryb_man = st.radio("Ceny w sklepie zapisane jako", ["brutto", "netto"], index=1)
         vat_man = st.number_input("Stawka VAT (%)", value=23.0, step=1.0, min_value=0.0)
 
         vat_map = {}
@@ -910,6 +910,7 @@ def main():
             "raport": raport, "stat": stat,
             "pobrano": len(sklep), "kolizje": len(kolizje),
             "sklepy": len(wybrane_sklepy),
+            "czas": dt.datetime.now().strftime("%d.%m.%Y, godz. %H:%M"),
         }
 
     # --- render wyniku (poza przyciskiem — nie znika po filtrze/pobraniu) ---
@@ -917,6 +918,8 @@ def main():
     if not wynik:
         return
 
+    st.header("📋 Wynik walidacji")
+    st.caption(f"🕒 Data i godzina walidacji: {wynik['czas']}")
     st.caption(f"Pobrano {wynik['pobrano']} SKU z {wynik['sklepy']} sklepu/ów.")
     if wynik["kolizje"]:
         st.warning(f"{wynik['kolizje']} SKU występuje w obu sklepach — porównano do pierwszego trafionego.")
