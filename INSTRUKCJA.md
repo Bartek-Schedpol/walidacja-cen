@@ -68,6 +68,30 @@ SCHEDLINE_SECRET = "cs_secret_schedline"
 
 ---
 
+## Tryb „📤 Przygotuj zmiany" — masowa zmiana cen przez import WooCommerce
+
+Aplikacja **nie zapisuje sama** na sklep (zostaje Read-only). Generuje plik CSV, który
+wgrywasz przez wbudowany import WooCommerce. Kroki:
+
+1. Wybierz tryb **📤 Przygotuj zmiany** i sklep docelowy.
+2. Wgraj plik z **nowymi** cenami, zmapuj kolumny (SKU, Regular/Sale/Omnibus, daty, EAN).
+3. Kliknij **Pokaż zmiany** — zobaczysz podgląd (dry-run): co się zmieni (obecne vs nowe),
+   ile SKU bez zmian, które SKU nie istnieją na stronie (pomijane).
+4. Pobierz **plik importu** oraz **backup obecnych wartości** (do cofnięcia w razie czego).
+5. W WooCommerce: **Products → Import** → wskaż plik → zaznacz **„Update existing products"**
+   → na ekranie mapowania potwierdź kolumny (zwłaszcza **omnibus** i **EAN**) → uruchom.
+
+**Zasady bezpieczeństwa:**
+- Eksport zawiera **tylko zmienione produkty**; pozostałe pola są wypełniane obecnymi
+  wartościami, więc import niczego nie kasuje przypadkiem.
+- **Najpierw testuj na 1 produkcie** i trzymaj backup.
+- **Omnibus:** jeśli sklep ma wtyczkę liczącą omnibus automatycznie, ręcznie wypchnięty
+  `_price-omnibus` może zostać nadpisany — sprawdź na 1 produkcie.
+- **EAN:** kolumna to `meta:<klucz>` wykryty ze sklepu (albo `global_unique_id`). Jeśli
+  import nie zaktualizuje EAN, przypisz kolumnę ręcznie na ekranie mapowania importera.
+
+---
+
 ## Uruchomienie lokalne (do testów, opcjonalne)
 
 ```bash

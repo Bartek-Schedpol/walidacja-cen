@@ -139,8 +139,10 @@ def pobierz_ceny_ze_sklepu(sklep_nazwa):
     secret = st.secrets[cfg["secret"]]
 
     # tylko potrzebne pola — mniejszy payload, szybsza odpowiedź
-    POLA_PROD = "id,sku,name,type,regular_price,sale_price,on_sale,date_on_sale_from,date_on_sale_to,meta_data"
-    POLA_VAR  = "id,sku,regular_price,sale_price,on_sale,date_on_sale_from,date_on_sale_to,meta_data"
+    POLA_PROD = ("id,sku,name,type,regular_price,sale_price,on_sale,"
+                 "date_on_sale_from,date_on_sale_to,meta_data,global_unique_id")
+    POLA_VAR  = ("id,sku,regular_price,sale_price,on_sale,"
+                 "date_on_sale_from,date_on_sale_to,meta_data,global_unique_id")
 
     sess = requests.Session()
     sess.auth = (key, secret)
@@ -178,6 +180,7 @@ def pobierz_ceny_ze_sklepu(sklep_nazwa):
             if m.get("key") == "_price-omnibus":
                 omnibus = num(m.get("value"))
                 break
+        ean, ean_klucz = _wyciag_ean_para(obj)
         return {
             "sklep":     sklep_nazwa,
             "id":        obj.get("id"),
@@ -188,6 +191,8 @@ def pobierz_ceny_ze_sklepu(sklep_nazwa):
             "on_sale":   bool(obj.get("on_sale")),
             "date_from": obj.get("date_on_sale_from"),
             "date_to":   obj.get("date_on_sale_to"),
+            "ean":       ean,
+            "ean_klucz": ean_klucz,
         }
 
     sklep, zmienne = {}, []
@@ -376,6 +381,14 @@ POLA = {
 }
 
 
+# Przyjazne etykiety pól w UI (klucze POLA zostają wewnętrzne — nie zmieniać!)
+ETYKIETY = {
+    "Regular": "Regular (katalogowa netto)",
+    "Sale":    "Sale (promocyjna netto)",
+    "Omnibus": "Omnibus (netto)",
+}
+
+
 def _uprosc(s):
     return re.sub(r"[^a-z0-9]+", " ", str(s).lower()).strip()
 
@@ -422,6 +435,7 @@ def normalizuj(df, mapowanie):
 
     out["Data od"] = df[m["Data od"]] if "Data od" in m else None
     out["Data do"] = df[m["Data do"]] if "Data do" in m else None
+    out["EAN"] = df[m["EAN"]].astype(str).str.strip() if "EAN" in m else None
 
     # prawdziwy kod produktu: niepusty, bez spacji, rozsądnej długości.
     # Odsiewa wiersze-nagłówki/legendy (np. "ORIENTACYJNA DOSTĘPNOŚĆ...").
@@ -541,17 +555,22 @@ def _strip_html(s):
     return re.sub(r"<[^>]+>", "", str(s or "")).strip()
 
 
-def _wyciag_ean(obj):
-    """EAN/GTIN — z pola global_unique_id (Woo 9.2+) lub z meta."""
+def _wyciag_ean_para(obj):
+    """EAN/GTIN → (wartość, klucz źródła). Klucz = 'global_unique_id' lub nazwa meta."""
     g = obj.get("global_unique_id")
     if g and str(g).strip():
-        return str(g).strip()
+        return str(g).strip(), "global_unique_id"
     klucze = ("_ean", "ean", "_gtin", "gtin", "_alg_wc_ean", "_wpm_gtin_code",
               "_global_unique_id", "barcode", "_barcode")
     for m in obj.get("meta_data", []):
         if m.get("key") in klucze and str(m.get("value") or "").strip():
-            return str(m.get("value")).strip()
-    return ""
+            return str(m.get("value")).strip(), m.get("key")
+    return "", ""
+
+
+def _wyciag_ean(obj):
+    """EAN/GTIN — tylko wartość (zgodność wsteczna)."""
+    return _wyciag_ean_para(obj)[0]
 
 
 @st.cache_data(ttl=300, show_spinner=False)
@@ -700,7 +719,7 @@ def koloruj(row):
         kolor = "background-color: #EAF3DE"          # zielony
     elif "RÓŻNICA" in status or "KRYTYCZNE" in status:
         kolor = "background-color: #FBE4E4"          # czerwony
-    elif "OSTRZE" in status or "BRAKI" in status:
+    elif "OSTRZE" in status or "BRAKI" in status or "ZMIANA" in status:
         kolor = "background-color: #FFF3CD"          # żółty
     elif "WYCOFANY" in status:
         kolor = "background-color: #FAEEDA"
@@ -783,6 +802,192 @@ def tryb_audyt(wybrane_sklepy):
 
 
 # ===========================================================================
+# WIDOK: PRZYGOTUJ ZMIANY (plik importu WooCommerce)
+# ===========================================================================
+
+# pole wewn -> (nagłówek CSV importera, klucz rekordu sklepu, czy_cena)
+POLA_IMPORT = [
+    ("Regular", "Regular price", "regular", True),
+    ("Sale",    "Sale price", "sale", True),
+    ("Omnibus", "meta:_price-omnibus", "omnibus", True),
+    ("Data od", "Date sale price starts", "date_from", False),
+    ("Data do", "Date sale price ends", "date_to", False),
+]
+
+
+def _fmt_cena(v):
+    return f"{v:.2f}" if v is not None else ""
+
+
+def zbuduj_diff(plik_df, sklep, plik_basis, tryb, vat, ean_header):
+    """Porównuje plik ze sklepem (netto) i buduje: podgląd zmian, plik importu
+    (tylko zmienione SKU, wartości w bazie sklepu) oraz backup obecnych wartości.
+    Puste pole w pliku => zostaje wartość obecna (import nic nie kasuje)."""
+    dostepne = {p for p, _, _, cena in POLA_IMPORT if p in plik_df and plik_df[p].notna().any()}
+    ma_ean = "EAN" in plik_df and plik_df["EAN"].notna().any()
+
+    display, eksport, backup = [], [], []
+    stat = {"zmiany": 0, "bez_zmian": 0, "brak": 0}
+
+    def store_val(netto, brutto):
+        return netto if tryb == "netto" else brutto
+
+    for _, r in plik_df.iterrows():
+        sku = r["SKU"]
+        if sku not in sklep:
+            display.append({"SKU": sku, "ID": "—", "Pole": "-",
+                            "Obecna (netto)": "-", "Nowa (netto)": "-", "Status": "❓ BRAK SKU"})
+            stat["brak"] += 1
+            continue
+
+        s = sklep[sku]
+        rek = {"ID": s["id"], "SKU": sku}
+        bak = {"ID": s["id"], "SKU": sku}
+        zmiana = False
+
+        for pole, header, klucz, cena in POLA_IMPORT:
+            if pole not in dostepne:
+                continue
+            if cena:
+                nn, nb = netto_brutto(r.get(pole), plik_basis, vat)   # nowa netto/brutto
+                cur_netto = netto_brutto(s[klucz], tryb, vat)[0]       # obecna netto
+                final = store_val(nn, nb) if nn is not None else s[klucz]
+                rozne = nn is not None and (cur_netto is None or abs(nn - cur_netto) > 0.01)
+                rek[header] = _fmt_cena(final)
+                bak[header] = _fmt_cena(s[klucz])
+                obecna_txt = _fmt_cena(cur_netto) or "brak"
+                nowa_txt = _fmt_cena(nn) if nn is not None else "—"
+            else:
+                nowa = norm_date(r.get(pole))
+                obecna = norm_date(s[klucz])
+                final = nowa if nowa else (obecna or "")
+                rozne = bool(nowa) and nowa != obecna
+                rek[header] = final
+                bak[header] = obecna or ""
+                obecna_txt, nowa_txt = (obecna or "brak"), (nowa or "—")
+            if rozne:
+                zmiana = True
+                display.append({"SKU": sku, "ID": s["id"], "Pole": pole,
+                                "Obecna (netto)": obecna_txt, "Nowa (netto)": nowa_txt,
+                                "Status": "🟠 ZMIANA"})
+
+        if ma_ean:
+            nowa = str(r.get("EAN") or "").strip()
+            nowa = "" if nowa in ("nan", "None") else nowa
+            obecna = s.get("ean", "")
+            rek[ean_header] = nowa if nowa else obecna
+            bak[ean_header] = obecna
+            if nowa and nowa != obecna:
+                zmiana = True
+                display.append({"SKU": sku, "ID": s["id"], "Pole": "EAN",
+                                "Obecna (netto)": obecna or "brak", "Nowa (netto)": nowa,
+                                "Status": "🟠 ZMIANA"})
+
+        if zmiana:
+            eksport.append(rek)
+            backup.append(bak)
+            stat["zmiany"] += 1
+        else:
+            stat["bez_zmian"] += 1
+
+    return (pd.DataFrame(display), pd.DataFrame(eksport), pd.DataFrame(backup), stat)
+
+
+def tryb_eksport_zmian(dostepne_sklepy):
+    st.subheader("📤 Przygotuj zmiany cen (plik importu WooCommerce)")
+    st.caption("Apka NIE zapisuje sama. Tworzy plik CSV, który wgrywasz przez natywny import "
+               "WooCommerce (Products → Import → zaznacz 'Update existing products').")
+
+    sklep_nazwa = st.selectbox("Sklep docelowy", dostepne_sklepy)
+    plik = st.file_uploader("📄 Plik z NOWYMI cenami (CSV / Excel)",
+                            type=["csv", "xlsx", "xls"], key="imp_up")
+    if not plik:
+        st.info("⬆️ Wgraj plik z nowymi cenami.")
+        return
+
+    arkusze = lista_arkuszy(plik)
+    arkusz = st.selectbox("Arkusz", arkusze, key="imp_ark") if len(arkusze) > 1 \
+        else (arkusze[0] if arkusze else None)
+    auto_hdr = wykryj_wiersz_naglowka(plik, arkusz)
+    hdr = st.number_input("Wiersz z nazwami kolumn (nr, od 1)", min_value=1,
+                          value=auto_hdr + 1, step=1, key="imp_hdr") - 1
+    surowy = wczytaj_surowo(plik, arkusz, header_row=hdr)
+    st.caption(f"Wczytano {len(surowy)} wierszy.")
+
+    st.subheader("🧩 Mapowanie kolumn")
+    auto = auto_mapowanie(list(surowy.columns))
+    opcje = ["—"] + list(surowy.columns)
+    mapowanie = {}
+    kol_ui = st.columns(3)
+    for i, pole in enumerate(POLA):
+        with kol_ui[i % 3]:
+            dom = auto.get(pole)
+            idx = opcje.index(dom) if dom in opcje else 0
+            mapowanie[pole] = st.selectbox(ETYKIETY.get(pole, pole), opcje, index=idx,
+                                           key=f"impmap_{pole}")
+    if mapowanie.get("SKU", "—") == "—":
+        st.error("Wskaż kolumnę SKU — bez niej nie ma jak dopasować produktów.")
+        return
+
+    plik_df = normalizuj(surowy, mapowanie)
+    plik_basis = st.radio("Ceny w pliku podane jako", ["netto", "brutto"], index=0,
+                          horizontal=True, key="imp_basis")
+
+    if st.button("🔍 Pokaż zmiany (podgląd)", type="primary"):
+        try:
+            with st.spinner("Pobieram bieżące dane ze sklepu..."):
+                sklep = pobierz_ceny_ze_sklepu(sklep_nazwa)
+        except Exception as e:
+            st.error(f"Błąd połączenia ze sklepem: {e}")
+            st.stop()
+        kv = pobierz_konfig_vat(sklep_nazwa)
+        tryb = kv["tryb"] or "netto"
+        vat = kv["vat"] if kv["vat"] is not None else 23.0
+        klucze = [s.get("ean_klucz") for s in sklep.values() if s.get("ean_klucz")]
+        ean_src = max(set(klucze), key=klucze.count) if klucze else "_ean"
+        ean_header = ean_src if ean_src == "global_unique_id" else f"meta:{ean_src}"
+        disp, exp, bak, stat = zbuduj_diff(plik_df, sklep, plik_basis, tryb, vat, ean_header)
+        st.session_state["eksport"] = {
+            "disp": disp, "exp": exp, "bak": bak, "stat": stat, "ean": ean_header,
+            "sklep": sklep_nazwa, "tryb": tryb,
+            "czas": dt.datetime.now().strftime("%d.%m.%Y, godz. %H:%M"),
+        }
+
+    wynik = st.session_state.get("eksport")
+    if not wynik:
+        return
+
+    st.header("📋 Podgląd zmian (dry-run)")
+    st.caption(f"🕒 {wynik['czas']} · sklep: {wynik['sklep']} · ceny w sklepie: {wynik['tryb']}")
+    stat = wynik["stat"]
+    m1, m2, m3 = st.columns(3)
+    m1.metric("🟠 Do zmiany (SKU)", stat["zmiany"])
+    m2.metric("✅ Bez zmian", stat["bez_zmian"])
+    m3.metric("❓ Brak SKU na stronie", stat["brak"])
+
+    disp = wynik["disp"]
+    if not disp.empty:
+        st.dataframe(disp.style.apply(koloruj, axis=1), use_container_width=True, height=440)
+
+    exp = wynik["exp"]
+    if exp.empty:
+        st.info("Brak zmian do zapisania — plik zgodny ze sklepem.")
+        return
+
+    st.success(f"Plik importu obejmie {len(exp)} produktów ze zmianą "
+               f"(kolumna EAN: {wynik['ean']}).")
+    c1, c2 = st.columns(2)
+    c1.download_button("📥 Pobierz plik importu (do WooCommerce)", exp.to_csv(index=False),
+                       file_name=f"import_{wynik['sklep']}.csv", mime="text/csv", type="primary")
+    c2.download_button("🛟 Pobierz backup obecnych wartości", wynik["bak"].to_csv(index=False),
+                       file_name=f"backup_{wynik['sklep']}.csv", mime="text/csv")
+    st.warning("⚠️ Zanim zaimportujesz: **zachowaj backup**, przetestuj na 1 produkcie, "
+               "w WooCommerce zaznacz 'Update existing products' i sprawdź na ekranie mapowania "
+               "kolumny **omnibus** oraz **EAN** (mogą wymagać ręcznego przypisania lub — przy "
+               "aktywnej wtyczce omnibus — być liczone automatycznie).")
+
+
+# ===========================================================================
 # GŁÓWNY WIDOK
 # ===========================================================================
 
@@ -839,11 +1044,14 @@ def main():
         st.warning("Zaznacz przynajmniej jeden sklep w panelu bocznym.")
         return
 
-    tryb = st.radio("Tryb", ["📄 Weryfikacja z pliku", "🔎 Audyt sklepu"],
+    tryb = st.radio("Tryb", ["📄 Weryfikacja z pliku", "🔎 Audyt sklepu", "📤 Przygotuj zmiany"],
                     horizontal=True, label_visibility="collapsed")
     st.divider()
     if tryb.startswith("🔎"):
         tryb_audyt(wybrane_sklepy)
+        return
+    if tryb.startswith("📤"):
+        tryb_eksport_zmian(wybrane_sklepy)
         return
 
     plik_promo = st.file_uploader("📄 Plik z cenami (CSV / Excel)",
@@ -877,7 +1085,8 @@ def main():
         with kolumny_ui[i % 3]:
             dom = auto.get(pole)
             idx = opcje.index(dom) if dom in opcje else 0
-            mapowanie[pole] = st.selectbox(pole, opcje, index=idx, key=f"map_{pole}")
+            mapowanie[pole] = st.selectbox(ETYKIETY.get(pole, pole), opcje, index=idx,
+                                           key=f"map_{pole}")
 
     if mapowanie.get("SKU", "—") == "—":
         st.error("Musisz wskazać kolumnę SKU — bez niej nie ma jak dopasować produktów.")
