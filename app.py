@@ -826,9 +826,10 @@ def tryb_audyt(wybrane_sklepy):
     buf = io.StringIO()
     df.to_csv(buf, index=False)
     a.download_button("💾 Pobierz CSV", buf.getvalue(),
-                      file_name="audyt_kompletnosci.csv", mime="text/csv")
+                      file_name=f"audyt_kompletnosci_{dt.date.today():%Y-%m-%d}.csv",
+                      mime="text/csv")
     b.download_button("📊 Pobierz Excel", do_excela(df),
-                      file_name="audyt_kompletnosci.xlsx",
+                      file_name=f"audyt_kompletnosci_{dt.date.today():%Y-%m-%d}.xlsx",
                       mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
 
 
@@ -1161,9 +1162,11 @@ def tryb_eksport_zmian(dostepne_sklepy):
                f"(z wierszami Parent serii).")
     c1, c2 = st.columns(2)
     c1.download_button("📥 Pobierz plik importu (format Twojego cennika)", exp.to_csv(index=False),
-                       file_name=f"import_{wynik['sklep']}.csv", mime="text/csv", type="primary")
+                       file_name=f"import_{wynik['sklep']}_{dt.date.today():%Y-%m-%d}.csv",
+                       mime="text/csv", type="primary")
     c2.download_button("🛟 Pobierz backup obecnych wartości", wynik["bak"].to_csv(index=False),
-                       file_name=f"backup_{wynik['sklep']}.csv", mime="text/csv")
+                       file_name=f"backup_{wynik['sklep']}_{dt.date.today():%Y-%m-%d}.csv",
+                       mime="text/csv")
     st.warning("⚠️ Zanim zaimportujesz: **zachowaj backup**, przetestuj na 1 serii, sprawdź "
                "dopasowanie po ID. Format = Twój cennik (11 kolumn, Parent przed wariantami). "
                "Uwaga: nie ma kolumny EAN — jeśli chcesz aktualizować EAN, powiem jak dodać.")
@@ -1336,9 +1339,10 @@ def main():
     buf = io.StringIO()
     pelny.to_csv(buf, index=False)
     c1.download_button("💾 Pobierz CSV", buf.getvalue(),
-                       file_name="raport_weryfikacji.csv", mime="text/csv")
+                       file_name=f"raport_weryfikacji_{dt.date.today():%Y-%m-%d}.csv",
+                       mime="text/csv")
     c2.download_button("📊 Pobierz Excel", do_excela(pelny),
-                       file_name="raport_weryfikacji.xlsx",
+                       file_name=f"raport_weryfikacji_{dt.date.today():%Y-%m-%d}.xlsx",
                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
 
 
