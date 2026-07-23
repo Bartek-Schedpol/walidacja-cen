@@ -423,8 +423,13 @@ def normalizuj(df, mapowanie):
     out["Data od"] = df[m["Data od"]] if "Data od" in m else None
     out["Data do"] = df[m["Data do"]] if "Data do" in m else None
 
-    out = out[out["SKU"].notna() & ~out["SKU"].isin(["", "nan", "None"])]
-    return out.reset_index(drop=True)
+    # prawdziwy kod produktu: niepusty, bez spacji, rozsądnej długości.
+    # Odsiewa wiersze-nagłówki/legendy (np. "ORIENTACYJNA DOSTĘPNOŚĆ...").
+    sku = out["SKU"]
+    prawidlowe = (sku.notna() & ~sku.isin(["", "nan", "None"])
+                  & ~sku.str.contains(r"\s", regex=True, na=False)
+                  & (sku.str.len() <= 50))
+    return out[prawidlowe].reset_index(drop=True)
 
 
 # ===========================================================================
@@ -438,71 +443,71 @@ def norm_date(v):
 
 
 def porownaj(plik_df, sklep, vat_map, plik_basis, tol, sprawdz_daty):
-    """Porównuje plik ze sklepem. Zwraca (DataFrame raportu, statystyki).
-    vat_map: {nazwa_sklepu: (tryb, vat)} — konfiguracja VAT osobno per sklep.
-    plik_basis: "brutto"/"netto" — w jakiej bazie są ceny w pliku.
-    Obie strony sprowadzane do brutto; różnica brutto == różnica netto,
-    więc jedna kontrola pokrywa oba (bez ryzyka zdublowania)."""
+    """Porównuje plik ze sklepem — WYŁĄCZNIE w wartościach netto.
+    Zwraca (DataFrame raportu, statystyki). Jeden wiersz = jedno porównane pole,
+    z widocznymi wartościami po obu stronach (także dla zgodnych)."""
     wiersze = []
     stat = {"zgodne": 0, "roznica": 0, "brak": 0}
     dzis = dt.date.today()
+
+    def wart(v):
+        return f"{v:.2f}" if v is not None else "brak"
 
     for _, r in plik_df.iterrows():
         sku = r["SKU"]
         if sku not in sklep:
             wiersze.append({"SKU": sku, "Sklep": "—", "Status": "❓ BRAK NA STRONIE",
-                            "Pole": "-", "Na stronie": "-", "W pliku": "-"})
+                            "Pole": "-", "Na stronie (netto)": "-", "W pliku (netto)": "-"})
             stat["brak"] += 1
             continue
 
         s = sklep[sku]
-        tryb_vat, vat = vat_map.get(s["sklep"], ("brutto", 23.0))
+        tryb_vat, vat = vat_map.get(s["sklep"], ("netto", 23.0))
+        ma_roznice, cos_porownano = False, False
 
-        # (netto, brutto) — indeks 1 = brutto, na nim porównujemy
-        pary = [
-            ("Regular", netto_brutto(r.get("Regular"), plik_basis, vat),
-                        netto_brutto(s["regular"], tryb_vat, vat)),
-            ("Sale",    netto_brutto(r.get("Sale"), plik_basis, vat),
-                        netto_brutto(s["sale"], tryb_vat, vat)),
-            ("Omnibus", netto_brutto(r.get("Omnibus"), plik_basis, vat),
-                        netto_brutto(s["omnibus"], tryb_vat, vat)),
-        ]
-
-        problemy = []
-        for pole, (f_n, f_b), (s_n, s_b) in pary:
-            if f_b is None:                       # pole nie ma go w pliku — pomijamy
+        # ceny — bierzemy netto (indeks 0 z pary netto/brutto)
+        for pole, klucz in (("Regular", "regular"), ("Sale", "sale"), ("Omnibus", "omnibus")):
+            f_n = netto_brutto(r.get(pole), plik_basis, vat)[0]
+            if f_n is None:                       # pola nie ma w pliku — pomijamy
                 continue
-            if s_b is None:
-                problemy.append((pole, "brak", f"{f_b} (n: {f_n})"))
-            elif abs(f_b - s_b) > tol:
-                problemy.append((pole, f"{s_b} (n: {s_n})", f"{f_b} (n: {f_n})"))
+            s_n = netto_brutto(s[klucz], tryb_vat, vat)[0]
+            cos_porownano = True
+            zgodne = s_n is not None and abs(f_n - s_n) <= tol
+            if not zgodne:
+                ma_roznice = True
+            wiersze.append({
+                "SKU": sku, "Sklep": s["sklep"],
+                "Status": "✅ ZGODNE" if zgodne else "🔴 RÓŻNICA",
+                "Pole": pole, "Na stronie (netto)": wart(s_n), "W pliku (netto)": wart(f_n),
+            })
 
         if sprawdz_daty:
-            for pole, chce_raw, ma_raw in (
-                ("Data od", r.get("Data od"), s["date_from"]),
-                ("Data do", r.get("Data do"), s["date_to"]),
-            ):
-                chce, ma = norm_date(chce_raw), norm_date(ma_raw)
-                if chce and chce != ma:
-                    problemy.append((pole, ma or "brak", chce))
+            for pole, fv, sv in (("Data od", r.get("Data od"), s["date_from"]),
+                                 ("Data do", r.get("Data do"), s["date_to"])):
+                fd = norm_date(fv)
+                if not fd:
+                    continue
+                sd = norm_date(sv)
+                cos_porownano = True
+                zgodne = (fd == sd)
+                if not zgodne:
+                    ma_roznice = True
+                wiersze.append({
+                    "SKU": sku, "Sklep": s["sklep"],
+                    "Status": "✅ ZGODNE" if zgodne else "🔴 RÓŻNICA",
+                    "Pole": pole, "Na stronie (netto)": sd or "brak", "W pliku (netto)": fd,
+                })
 
-        # logiczne / prawne kontrole promocji (Omnibus)
-        ostrzez = kontrola_logiki(s, dzis)
+        # logiczne / prawne kontrole promocji (Omnibus) — jako osobne ostrzeżenia
+        for opis in kontrola_logiki(s, dzis):
+            wiersze.append({"SKU": sku, "Sklep": s["sklep"], "Status": "🟠 OSTRZEŻENIE",
+                            "Pole": opis, "Na stronie (netto)": "-", "W pliku (netto)": "-"})
 
-        if problemy or ostrzez:
-            for pole, ma, chce in problemy:
-                wiersze.append({"SKU": sku, "Sklep": s["sklep"], "Status": "🔴 RÓŻNICA",
-                                "Pole": pole, "Na stronie": ma, "W pliku": chce})
-            for opis in ostrzez:
-                wiersze.append({"SKU": sku, "Sklep": s["sklep"], "Status": "🟠 OSTRZEŻENIE",
-                                "Pole": opis, "Na stronie": "-", "W pliku": "-"})
-            if problemy:
-                stat["roznica"] += 1
-            else:
-                stat["zgodne"] += 1
-        else:
-            wiersze.append({"SKU": sku, "Sklep": s["sklep"], "Status": "✅ ZGODNE",
-                            "Pole": "-", "Na stronie": "-", "W pliku": "-"})
+        if ma_roznice:
+            stat["roznica"] += 1
+        elif cos_porownano:
+            stat["zgodne"] += 1
+        else:                                     # SKU jest na stronie, ale plik nie miał co porównać
             stat["zgodne"] += 1
 
     return pd.DataFrame(wiersze), stat
