@@ -31,6 +31,7 @@ Uruchomienie lokalne:
 
 import io
 import re
+import calendar
 import datetime as dt
 import concurrent.futures as cf
 
@@ -819,6 +820,28 @@ def _fmt_cena(v):
     return f"{v:.2f}" if v is not None else ""
 
 
+NAZWY_MIES = ["Styczeń", "Luty", "Marzec", "Kwiecień", "Maj", "Czerwiec",
+              "Lipiec", "Sierpień", "Wrzesień", "Październik", "Listopad", "Grudzień"]
+
+
+def wybor_daty(label, key, domyslna):
+    """Wybór daty przez 3 listy: Rok / Miesiąc / Dzień — natychmiastowy skok
+    na dowolną datę w całym roku, bez klikania strzałkami. Zwraca datetime.date."""
+    st.caption(label)
+    rok_bazowy = dt.date.today().year
+    lata = list(range(rok_bazowy - 1, rok_bazowy + 4))
+    if domyslna.year not in lata:
+        lata = sorted(set(lata) | {domyslna.year})
+    c1, c2, c3 = st.columns(3)
+    rok = c1.selectbox("Rok", lata, index=lata.index(domyslna.year), key=f"{key}_r")
+    mies = c2.selectbox("Miesiąc", list(range(1, 13)), index=domyslna.month - 1,
+                        key=f"{key}_m", format_func=lambda m: f"{m:02d} – {NAZWY_MIES[m-1]}")
+    dni_max = calendar.monthrange(rok, mies)[1]
+    dzien = c3.selectbox("Dzień", list(range(1, dni_max + 1)),
+                         index=min(domyslna.day, dni_max) - 1, key=f"{key}_d")
+    return dt.date(rok, mies, dzien)
+
+
 def zbuduj_diff(plik_df, sklep, plik_basis, tryb, vat, ean_header):
     """Porównuje plik ze sklepem (netto) i buduje: podgląd zmian, plik importu
     (tylko zmienione SKU, wartości w bazie sklepu) oraz backup obecnych wartości.
@@ -938,9 +961,9 @@ def tryb_eksport_zmian(dostepne_sklepy):
     zrodlo_dat = st.radio("Źródło dat", ["Z pliku (kolumny)", "Ręcznie (kalendarz)", "Nie ustawiaj"],
                           horizontal=True, key="imp_daty", label_visibility="collapsed")
     if zrodlo_dat.startswith("Ręcznie"):
-        d1, d2 = st.columns(2)
-        data_od = d1.date_input("Data od", key="imp_od", format="YYYY-MM-DD")
-        data_do = d2.date_input("Data do", key="imp_do", format="YYYY-MM-DD")
+        dzis = dt.date.today()
+        data_od = wybor_daty("📅 Data od", "imp_od", dzis)
+        data_do = wybor_daty("📅 Data do", "imp_do", dzis + dt.timedelta(days=30))
         plik_df["Data od"] = data_od.strftime("%Y-%m-%d")
         plik_df["Data do"] = data_do.strftime("%Y-%m-%d")
         st.caption(f"Daty ustawione ręcznie dla wszystkich zmienianych produktów: "
