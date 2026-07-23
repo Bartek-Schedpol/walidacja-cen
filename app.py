@@ -32,6 +32,7 @@ Uruchomienie lokalne:
 import io
 import re
 import datetime as dt
+import concurrent.futures as cf
 
 import pandas as pd
 import requests
@@ -56,21 +57,64 @@ SKLEPY = {
 
 
 # ===========================================================================
+# STYL (wygląd — nie zmienia logiki)
+# ===========================================================================
+
+def wstrzyknij_styl():
+    """Wstrzykuje CSS: font Plus Jakarta Sans, jasne tło, białe zaokrąglone
+    karty, akcent pomarańczowy. Wyłącznie warstwa wizualna."""
+    st.markdown("""
+    <style>
+    @import url('https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&display=swap');
+    :root { --akcent:#F15A29; --tekst:#1A1D1F; --tlo:#F4F5F7; --karta:#FFFFFF; }
+    html, body, .stApp, [class*="css"] {
+        font-family:'Plus Jakarta Sans','Poppins',system-ui,sans-serif !important;
+        color:var(--tekst);
+    }
+    .stApp { background:var(--tlo); }
+    h1,h2,h3 { font-weight:800 !important; letter-spacing:-.02em; }
+    [data-testid="stSidebar"] { background:var(--karta); border-right:1px solid #E9EBEE; }
+    [data-testid="stMetric"] {
+        background:var(--karta); border-radius:18px; padding:18px 22px;
+        box-shadow:0 2px 10px rgba(20,20,40,.05); border:1px solid #EDEFF2;
+    }
+    [data-testid="stFileUploader"], .stDataFrame, [data-testid="stExpander"] {
+        background:var(--karta); border-radius:18px; border:1px solid #EDEFF2;
+    }
+    [data-testid="stFileUploader"] { padding:10px 14px; }
+    .stButton>button, .stDownloadButton>button, .stFormSubmitButton>button {
+        border-radius:12px; font-weight:600; border:1px solid #E3E6EA; padding:.5rem 1.1rem;
+    }
+    .stButton>button[kind="primary"], .stFormSubmitButton>button[kind="primary"] {
+        background:var(--akcent); border:none; color:#fff;
+    }
+    .stButton>button[kind="primary"]:hover { background:#d94a1e; }
+    input, textarea, [data-baseweb="input"], [data-baseweb="select"]>div {
+        border-radius:12px !important;
+    }
+    [data-baseweb="tag"] { background:var(--akcent) !important; border-radius:8px !important; }
+    </style>
+    """, unsafe_allow_html=True)
+
+
+# ===========================================================================
 # LOGOWANIE
 # ===========================================================================
 
 def sprawdz_haslo():
-    """Prosty gate hasłem. Zwraca True jeśli zalogowany."""
+    """Prosty gate hasłem. Zwraca True jeśli zalogowany.
+    Formularz → Enter w polu hasła również loguje."""
     if st.session_state.get("zalogowany"):
         return True
 
     st.title("🔒 Weryfikator Cen Schedpol / Schedline")
     st.caption("Narzędzie wewnętrzne zespołu Trade / BOK")
 
-    haslo = st.text_input("Hasło dostępu", type="password")
-    if st.button("Zaloguj"):
-        prawidlowe = st.secrets.get("APP_HASLO", "")
-        if haslo and haslo == prawidlowe:
+    with st.form("logowanie"):
+        haslo = st.text_input("Hasło dostępu", type="password")
+        wyslij = st.form_submit_button("Zaloguj", type="primary")
+    if wyslij:
+        if haslo and haslo == st.secrets.get("APP_HASLO", ""):
             st.session_state["zalogowany"] = True
             st.rerun()
         else:
@@ -94,27 +138,32 @@ def pobierz_ceny_ze_sklepu(sklep_nazwa):
     key    = st.secrets[cfg["key"]]
     secret = st.secrets[cfg["secret"]]
 
-    def fetch_all(endpoint):
-        out, page = [], 1
-        while True:
-            resp = requests.get(
-                f"{url}/wp-json/wc/v3/{endpoint}",
-                auth=(key, secret),
-                params={"per_page": 100, "page": page},
-                timeout=30,
-            )
-            if resp.status_code == 401:
-                raise RuntimeError(f"[{sklep_nazwa}] 401 — złe klucze API lub brak uprawnień.")
-            if resp.status_code != 200:
-                raise RuntimeError(f"[{sklep_nazwa}] API {resp.status_code}: {resp.text[:200]}")
-            batch = resp.json()
-            if not batch:
-                break
-            out.extend(batch)
-            total = int(resp.headers.get("X-WP-TotalPages", page))
-            if page >= total:
-                break
-            page += 1
+    # tylko potrzebne pola — mniejszy payload, szybsza odpowiedź
+    POLA_PROD = "id,sku,name,type,regular_price,sale_price,on_sale,date_on_sale_from,date_on_sale_to,meta_data"
+    POLA_VAR  = "id,sku,regular_price,sale_price,on_sale,date_on_sale_from,date_on_sale_to,meta_data"
+
+    sess = requests.Session()
+    sess.auth = (key, secret)
+
+    def _get(endpoint, page, fields):
+        r = sess.get(f"{url}/wp-json/wc/v3/{endpoint}",
+                     params={"per_page": 100, "page": page, "_fields": fields}, timeout=30)
+        if r.status_code == 401:
+            raise RuntimeError(f"[{sklep_nazwa}] 401 — złe klucze API lub brak uprawnień.")
+        if r.status_code != 200:
+            raise RuntimeError(f"[{sklep_nazwa}] API {r.status_code}: {r.text[:200]}")
+        return r
+
+    def fetch_all(endpoint, fields):
+        """Pobiera stronę 1, potem pozostałe strony równolegle."""
+        r = _get(endpoint, 1, fields)
+        out = r.json()
+        total = int(r.headers.get("X-WP-TotalPages", 1))
+        if total > 1:
+            with cf.ThreadPoolExecutor(max_workers=8) as ex:
+                for batch in ex.map(lambda p: _get(endpoint, p, fields).json(),
+                                    range(2, total + 1)):
+                    out.extend(batch)
         return out
 
     def num(v):
@@ -142,18 +191,25 @@ def pobierz_ceny_ze_sklepu(sklep_nazwa):
         }
 
     sklep, zmienne = {}, []
-    for p in fetch_all("products"):
+    for p in fetch_all("products", POLA_PROD):
         sku = (p.get("sku") or "").strip()
         if p.get("type") == "variable":
             zmienne.append((p["id"], p.get("name", "")))
         if sku:
             sklep[sku] = wyciag(p)
 
-    for pid, pname in zmienne:
-        for v in fetch_all(f"products/{pid}/variations"):
-            sku = (v.get("sku") or "").strip()
-            if sku:
-                sklep[sku] = wyciag(v, pname)
+    # warianty pobierane równolegle — to był główny hamulec
+    def pobierz_warianty(pid_pname):
+        pid, pname = pid_pname
+        return pname, fetch_all(f"products/{pid}/variations", POLA_VAR)
+
+    if zmienne:
+        with cf.ThreadPoolExecutor(max_workers=8) as ex:
+            for pname, warianty in ex.map(pobierz_warianty, zmienne):
+                for v in warianty:
+                    sku = (v.get("sku") or "").strip()
+                    if sku:
+                        sklep[sku] = wyciag(v, pname)
 
     return sklep
 
@@ -248,16 +304,49 @@ def to_float(v):
         return None
 
 
-def wczytaj_surowo(uploaded, arkusz=None):
-    """Wczytuje CSV lub Excel jako surowy DataFrame (wszystko jako tekst)."""
+def wczytaj_surowo(uploaded, arkusz=None, header_row=0):
+    """Wczytuje CSV lub Excel jako surowy DataFrame (wszystko jako tekst).
+    header_row: indeks (0-based) wiersza z nazwami kolumn."""
     nazwa = uploaded.name.lower()
     if nazwa.endswith(".csv"):
         try:
-            return pd.read_csv(uploaded, dtype=str, sep=None, engine="python")
+            return pd.read_csv(uploaded, dtype=str, sep=None, engine="python", header=header_row)
         except Exception:
             uploaded.seek(0)
-            return pd.read_csv(uploaded, dtype=str)
-    return pd.read_excel(uploaded, dtype=str, sheet_name=arkusz or 0)
+            return pd.read_csv(uploaded, dtype=str, header=header_row)
+    return pd.read_excel(uploaded, dtype=str, sheet_name=arkusz or 0, header=header_row)
+
+
+def wykryj_wiersz_naglowka(uploaded, arkusz=None, limit=20):
+    """Zgaduje, który wiersz zawiera nazwy kolumn — szuka wiersza z największą
+    liczbą wypełnionych komórek i słowami kluczowymi (sku/ean/cena/nr kat...)."""
+    nazwa = uploaded.name.lower()
+    try:
+        if nazwa.endswith(".csv"):
+            raw = pd.read_csv(uploaded, dtype=str, sep=None, engine="python",
+                              header=None, nrows=limit)
+        else:
+            raw = pd.read_excel(uploaded, dtype=str, sheet_name=arkusz or 0,
+                                header=None, nrows=limit)
+    except Exception:
+        return 0
+    finally:
+        try:
+            uploaded.seek(0)
+        except Exception:
+            pass
+
+    klucze = ("sku", "ean", "cena", "price", "nr kat", "symbol", "kod", "nazwa", "wymiar")
+    best, best_score = 0, -1
+    for i, row in raw.iterrows():
+        komorki = [_uprosc(v) for v in row.tolist() if not pd.isna(v) and str(v).strip()]
+        if not komorki:
+            continue
+        kw = sum(any(k in c for k in klucze) for c in komorki)
+        score = len(komorki) + kw * 4
+        if score > best_score:
+            best_score, best = score, i
+    return int(best)
 
 
 def lista_arkuszy(uploaded):
@@ -274,7 +363,7 @@ def lista_arkuszy(uploaded):
 # JEDNA kolumna na typ ceny — bazę (netto/brutto) ustawia się osobnym
 # przełącznikiem „ceny w pliku podane jako", ta sama dla wszystkich cen.
 POLA = {
-    "SKU":     ["sku", "symbol", "indeks", "index", "kod produktu"],
+    "SKU":     ["sku", "nr kat", "nr katalogowy", "symbol", "indeks", "index", "kod produktu"],
     "EAN":     ["ean", "gtin", "kod kreskowy", "barcode"],
     "Regular": ["regular price", "cena regularna", "regularna", "cena katalogowa"],
     "Sale":    ["sale price", "cena promocyjna", "cena promo", "promocyjna", "promocja"],
@@ -439,19 +528,6 @@ def kontrola_logiki(s, dzis):
     return ost
 
 
-def sprawdz_wycofane(wycofane_df, sklep):
-    """Sprawdza, czy wycofane SKU wciąż mają aktywną promocję."""
-    wiersze = []
-    for _, r in wycofane_df.iterrows():
-        sku = r["SKU"]
-        if sku in sklep and sklep[sku]["on_sale"]:
-            wiersze.append({"SKU": sku, "Sklep": sklep[sku]["sklep"],
-                            "Status": "⚠️ WYCOFANY W PROMOCJI",
-                            "Pole": "on_sale", "Na stronie": "aktywna promocja",
-                            "W pliku": "powinno być wygaszone"})
-    return pd.DataFrame(wiersze)
-
-
 # ===========================================================================
 # KOLOROWANIE + EKSPORT
 # ===========================================================================
@@ -535,13 +611,8 @@ def main():
         st.warning("Zaznacz przynajmniej jeden sklep w panelu bocznym.")
         return
 
-    col1, col2 = st.columns(2)
-    with col1:
-        plik_promo = st.file_uploader("📄 Plik z cenami (CSV / Excel)",
-                                      type=["csv", "xlsx", "xls"])
-    with col2:
-        plik_wycofane = st.file_uploader("🗑️ Lista wycofanych SKU (opcjonalnie)",
-                                         type=["csv", "xlsx", "xls"])
+    plik_promo = st.file_uploader("📄 Plik z cenami (CSV / Excel)",
+                                  type=["csv", "xlsx", "xls"])
 
     if not plik_promo:
         st.info("⬆️ Wgraj plik z cenami, aby rozpocząć weryfikację.")
@@ -551,7 +622,13 @@ def main():
     arkusze = lista_arkuszy(plik_promo)
     arkusz = st.selectbox("Arkusz", arkusze) if len(arkusze) > 1 else (arkusze[0] if arkusze else None)
 
-    surowy = wczytaj_surowo(plik_promo, arkusz)
+    # --- wiersz nagłówka (cenniki mają tytuły nad tabelą) ---
+    auto_hdr = wykryj_wiersz_naglowka(plik_promo, arkusz)
+    hdr = st.number_input("Wiersz z nazwami kolumn (nr, licząc od 1)",
+                          min_value=1, value=auto_hdr + 1, step=1,
+                          help="Auto-wykryty. Zmień, jeśli nad tabelą są tytuły/scalone komórki.") - 1
+
+    surowy = wczytaj_surowo(plik_promo, arkusz, header_row=hdr)
     st.caption(f"Wczytano {len(surowy)} wierszy, kolumny: {', '.join(map(str, surowy.columns))}")
 
     # --- mapowanie kolumn ---
@@ -584,58 +661,60 @@ def main():
               f"tu wykryto: {dom_basis}. Cennik marketingowy B2C to zwykle brutto."),
     )
 
+    # --- uruchomienie: policz raz, wynik trzymaj w sesji ---
     if st.button("▶️ Uruchom weryfikację", type="primary"):
         try:
             with st.spinner("Pobieram aktualne ceny ze sklepów..."):
                 sklep, kolizje = pobierz_ze_sklepow(wybrane_sklepy)
         except Exception as e:
             st.error(f"Błąd połączenia ze sklepem: {e}")
-            return
-
-        st.caption(f"Pobrano {len(sklep)} SKU z {len(wybrane_sklepy)} sklepu/ów.")
-        if kolizje:
-            st.warning(f"{len(kolizje)} SKU występuje w obu sklepach — porównano do pierwszego trafionego.")
+            st.stop()
 
         raport, stat = porownaj(plik_df, sklep, vat_map, plik_basis, tol, sprawdz_daty)
+        st.session_state["wynik"] = {
+            "raport": raport, "stat": stat,
+            "pobrano": len(sklep), "kolizje": len(kolizje),
+            "sklepy": len(wybrane_sklepy),
+        }
 
-        raport_wyc = pd.DataFrame()
-        if plik_wycofane:
-            wsurowy = wczytaj_surowo(plik_wycofane)
-            wmap = auto_mapowanie(list(wsurowy.columns))
-            wdf = normalizuj(wsurowy, wmap)
-            if wdf is not None and len(wdf):
-                raport_wyc = sprawdz_wycofane(wdf, sklep)
+    # --- render wyniku (poza przyciskiem — nie znika po filtrze/pobraniu) ---
+    wynik = st.session_state.get("wynik")
+    if not wynik:
+        return
 
-        m1, m2, m3, m4 = st.columns(4)
-        m1.metric("✅ Zgodne", stat["zgodne"])
-        m2.metric("🔴 Różnice", stat["roznica"])
-        m3.metric("❓ Brak na stronie", stat["brak"])
-        m4.metric("⚠️ Wycofane w promo", len(raport_wyc))
+    st.caption(f"Pobrano {wynik['pobrano']} SKU z {wynik['sklepy']} sklepu/ów.")
+    if wynik["kolizje"]:
+        st.warning(f"{wynik['kolizje']} SKU występuje w obu sklepach — porównano do pierwszego trafionego.")
 
-        pelny = pd.concat([raport, raport_wyc], ignore_index=True) if not raport_wyc.empty else raport
+    stat, pelny = wynik["stat"], wynik["raport"]
+    m1, m2, m3 = st.columns(3)
+    m1.metric("✅ Zgodne", stat["zgodne"])
+    m2.metric("🔴 Różnice", stat["roznica"])
+    m3.metric("❓ Brak na stronie", stat["brak"])
 
-        st.divider()
-        st.subheader("Raport szczegółowy")
-        statusy = pelny["Status"].unique().tolist()
-        wybrane = st.multiselect("Filtruj status", statusy, default=statusy)
-        widok = pelny[pelny["Status"].isin(wybrane)]
+    st.divider()
+    st.subheader("Raport szczegółowy")
+    statusy = pelny["Status"].unique().tolist()
+    wybrane = st.multiselect("Filtruj status", statusy, default=statusy)
+    widok = pelny[pelny["Status"].isin(wybrane)]
 
-        st.dataframe(widok.style.apply(koloruj, axis=1),
-                     use_container_width=True, height=500)
+    st.dataframe(widok.style.apply(koloruj, axis=1),
+                 use_container_width=True, height=500)
 
-        c1, c2 = st.columns(2)
-        buf = io.StringIO()
-        pelny.to_csv(buf, index=False)
-        c1.download_button("💾 Pobierz CSV", buf.getvalue(),
-                           file_name="raport_weryfikacji.csv", mime="text/csv")
-        c2.download_button("📊 Pobierz Excel", do_excela(pelny),
-                           file_name="raport_weryfikacji.xlsx",
-                           mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+    c1, c2 = st.columns(2)
+    buf = io.StringIO()
+    pelny.to_csv(buf, index=False)
+    c1.download_button("💾 Pobierz CSV", buf.getvalue(),
+                       file_name="raport_weryfikacji.csv", mime="text/csv")
+    c2.download_button("📊 Pobierz Excel", do_excela(pelny),
+                       file_name="raport_weryfikacji.xlsx",
+                       mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
 
 
 # ===========================================================================
 # START
 # ===========================================================================
 
+wstrzyknij_styl()
 if sprawdz_haslo():
     main()
