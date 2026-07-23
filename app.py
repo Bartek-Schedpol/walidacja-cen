@@ -473,12 +473,14 @@ def norm_date(v):
     return re.split(r"[T ]", str(v).strip())[0]
 
 
-def porownaj(plik_df, sklep, vat_map, plik_basis, tol, sprawdz_daty):
+def porownaj(plik_df, sklep, vat_map, plik_basis, tol, sprawdz_daty,
+             pokaz_promo=True, oczek_data_do=None):
     """Porównuje plik ze sklepem — WYŁĄCZNIE w wartościach netto.
-    Zwraca (DataFrame raportu, statystyki). Jeden wiersz = jedno porównane pole,
-    z widocznymi wartościami po obu stronach (także dla zgodnych)."""
+    pokaz_promo: dla produktów w promocji dodaje wiersz z datą końca promocji.
+    oczek_data_do: jeśli podana, wyróżnia produkty w promocji z inną datą końca.
+    Zwraca (DataFrame raportu, statystyki). Jeden wiersz = jedno porównane pole."""
     wiersze = []
-    stat = {"zgodne": 0, "roznica": 0, "brak": 0}
+    stat = {"zgodne": 0, "roznica": 0, "brak": 0, "promo": 0, "promo_zla": 0}
     dzis = dt.date.today()
 
     def wart(v):
@@ -533,6 +535,24 @@ def porownaj(plik_df, sklep, vat_map, plik_basis, tol, sprawdz_daty):
         for opis in kontrola_logiki(s, dzis):
             wiersze.append({"SKU": sku, "Sklep": s["sklep"], "Status": "🟠 OSTRZEŻENIE",
                             "Pole": opis, "Na stronie (netto)": "-", "W pliku (netto)": "-"})
+
+        # data końca promocji — dla każdego produktu w aktywnej promocji
+        if pokaz_promo and s["on_sale"]:
+            stat["promo"] += 1
+            sd = norm_date(s["date_to"]) or "brak"
+            if oczek_data_do:
+                if sd == oczek_data_do:
+                    st_promo = "✅ PROMOCJA — data OK"
+                else:
+                    st_promo = "🔴 PROMOCJA — inna data"
+                    stat["promo_zla"] += 1
+                wiersze.append({"SKU": sku, "Sklep": s["sklep"], "Status": st_promo,
+                                "Pole": "Data końca promocji",
+                                "Na stronie (netto)": sd, "W pliku (netto)": oczek_data_do})
+            else:
+                wiersze.append({"SKU": sku, "Sklep": s["sklep"],
+                                "Status": "🔵 PROMOCJA — data końca", "Pole": "Data końca promocji",
+                                "Na stronie (netto)": sd, "W pliku (netto)": "-"})
 
         if ma_roznice:
             stat["roznica"] += 1
@@ -746,12 +766,14 @@ def audyt_kompletnosci(wpisy, cfg):
 
 def koloruj(row):
     status = row["Status"]
-    if "ZGODNE" in status or "KOMPLETNE" in status:
+    if "ZGODNE" in status or "KOMPLETNE" in status or "data OK" in status:
         kolor = "background-color: #EAF3DE"          # zielony
-    elif "RÓŻNICA" in status or "KRYTYCZNE" in status:
+    elif "RÓŻNICA" in status or "KRYTYCZNE" in status or "inna data" in status:
         kolor = "background-color: #FBE4E4"          # czerwony
     elif "OSTRZE" in status or "BRAKI" in status or "ZMIANA" in status:
         kolor = "background-color: #FFF3CD"          # żółty
+    elif "PROMOCJA" in status:
+        kolor = "background-color: #E7F0FA"          # niebieski (info o promocji)
     elif "WYCOFANY" in status:
         kolor = "background-color: #FAEEDA"
     else:
@@ -1290,6 +1312,15 @@ def main():
               f"tu wykryto: {dom_basis}. Cennik marketingowy B2C to zwykle brutto."),
     )
 
+    # --- data końca promocji dla produktów w aktywnej promocji ---
+    pokaz_promo = st.checkbox("Pokaż datę końca promocji dla produktów w promocji", value=True,
+                              help="Po walidacji każdy produkt w aktywnej promocji dostanie wiersz "
+                                   "z datą końca — także gdy dat nie ma w pliku.")
+    oczek_data_do = None
+    if pokaz_promo and st.checkbox("Porównaj z oczekiwaną datą końca promocji"):
+        oczek_data_do = wybor_daty("Oczekiwana data końca promocji", "oczek_do",
+                                   dt.date.today()).strftime("%Y-%m-%d")
+
     # --- uruchomienie: policz raz, wynik trzymaj w sesji ---
     if st.button("▶️ Uruchom weryfikację", type="primary"):
         try:
@@ -1299,11 +1330,12 @@ def main():
             st.error(f"Błąd połączenia ze sklepem: {e}")
             st.stop()
 
-        raport, stat = porownaj(plik_df, sklep, vat_map, plik_basis, tol, sprawdz_daty)
+        raport, stat = porownaj(plik_df, sklep, vat_map, plik_basis, tol, sprawdz_daty,
+                                pokaz_promo, oczek_data_do)
         st.session_state["wynik"] = {
             "raport": raport, "stat": stat,
             "pobrano": len(sklep), "kolizje": len(kolizje),
-            "sklepy": len(wybrane_sklepy),
+            "sklepy": len(wybrane_sklepy), "oczek": oczek_data_do,
             "czas": dt.datetime.now().strftime("%d.%m.%Y, godz. %H:%M"),
         }
 
@@ -1319,14 +1351,20 @@ def main():
         st.warning(f"{wynik['kolizje']} SKU występuje w obu sklepach — porównano do pierwszego trafionego.")
 
     stat, pelny = wynik["stat"], wynik["raport"]
-    m1, m2, m3 = st.columns(3)
+    m1, m2, m3, m4 = st.columns(4)
     m1.metric("✅ Zgodne", stat["zgodne"])
     m2.metric("🔴 Różnice", stat["roznica"])
     m3.metric("❓ Brak na stronie", stat["brak"])
+    if wynik.get("oczek"):
+        m4.metric("🔴 Zła data końca promo", stat.get("promo_zla", 0),
+                  help=f"Produkty w promocji z datą końca inną niż {wynik['oczek']}")
+    else:
+        m4.metric("🔵 W promocji", stat.get("promo", 0))
 
     st.divider()
     st.subheader("Raport szczegółowy")
-    KANON = ["✅ ZGODNE", "🔴 RÓŻNICA", "🟠 OSTRZEŻENIE", "❓ BRAK NA STRONIE"]
+    KANON = ["✅ ZGODNE", "🔴 RÓŻNICA", "🟠 OSTRZEŻENIE", "❓ BRAK NA STRONIE",
+             "🔵 PROMOCJA — data końca", "🔴 PROMOCJA — inna data", "✅ PROMOCJA — data OK"]
     obecne = pelny["Status"].unique().tolist()
     opcje_st = KANON + [s for s in obecne if s not in KANON]
     wybrane = st.multiselect("Filtruj status (ZGODNE = zielone)", opcje_st, default=obecne)
