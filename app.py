@@ -280,7 +280,7 @@ def pobierz_ze_sklepow(wybrane_sklepy):
 
 def netto_brutto(p, tryb, vat):
     """Z jednej ceny sklepowej wylicza parę (netto, brutto) wg trybu i VAT."""
-    if p is None:
+    if p is None or pd.isna(p):     # None oraz NaN (pandas robi NaN z pustych komórek)
         return (None, None)
     v = 1 + vat / 100.0
     if tryb == "brutto":          # w sklepie zapisane jest brutto
@@ -529,17 +529,174 @@ def kontrola_logiki(s, dzis):
 
 
 # ===========================================================================
+# AUDYT KOMPLETNOŚCI DANYCH PRODUKTOWYCH
+# ===========================================================================
+
+def _strip_html(s):
+    return re.sub(r"<[^>]+>", "", str(s or "")).strip()
+
+
+def _wyciag_ean(obj):
+    """EAN/GTIN — z pola global_unique_id (Woo 9.2+) lub z meta."""
+    g = obj.get("global_unique_id")
+    if g and str(g).strip():
+        return str(g).strip()
+    klucze = ("_ean", "ean", "_gtin", "gtin", "_alg_wc_ean", "_wpm_gtin_code",
+              "_global_unique_id", "barcode", "_barcode")
+    for m in obj.get("meta_data", []):
+        if m.get("key") in klucze and str(m.get("value") or "").strip():
+            return str(m.get("value")).strip()
+    return ""
+
+
+@st.cache_data(ttl=300, show_spinner=False)
+def pobierz_audyt_ze_sklepu(sklep_nazwa):
+    """Pobiera rozszerzone dane produktów (i wariantów) do audytu kompletności."""
+    cfg = SKLEPY[sklep_nazwa]
+    url    = st.secrets[cfg["url"]].rstrip("/")
+    key    = st.secrets[cfg["key"]]
+    secret = st.secrets[cfg["secret"]]
+
+    POLA = ("id,sku,name,type,status,regular_price,sale_price,on_sale,description,"
+            "short_description,images,categories,attributes,weight,dimensions,"
+            "meta_data,global_unique_id")
+    POLA_V = "id,sku,regular_price,on_sale,meta_data,global_unique_id"
+
+    sess = requests.Session()
+    sess.auth = (key, secret)
+
+    def _get(endpoint, page, fields):
+        r = sess.get(f"{url}/wp-json/wc/v3/{endpoint}",
+                     params={"per_page": 100, "page": page, "_fields": fields}, timeout=30)
+        if r.status_code == 401:
+            raise RuntimeError(f"[{sklep_nazwa}] 401 — złe klucze API lub brak uprawnień.")
+        if r.status_code != 200:
+            raise RuntimeError(f"[{sklep_nazwa}] API {r.status_code}: {r.text[:200]}")
+        return r
+
+    def fetch_all(endpoint, fields):
+        r = _get(endpoint, 1, fields)
+        out = r.json()
+        total = int(r.headers.get("X-WP-TotalPages", 1))
+        if total > 1:
+            with cf.ThreadPoolExecutor(max_workers=8) as ex:
+                for b in ex.map(lambda p: _get(endpoint, p, fields).json(), range(2, total + 1)):
+                    out.extend(b)
+        return out
+
+    def num(v):
+        try:
+            return round(float(v), 2)
+        except (TypeError, ValueError):
+            return None
+
+    def omni(o):
+        for m in o.get("meta_data", []):
+            if m.get("key") == "_price-omnibus":
+                return num(m.get("value"))
+        return None
+
+    def entry(o, typ_woo, parent=""):
+        return {
+            "sklep": sklep_nazwa, "sku": (o.get("sku") or "").strip(),
+            "nazwa": o.get("name") or parent, "typ": typ_woo,
+            "status": o.get("status", ""),
+            "regular": num(o.get("regular_price")), "on_sale": bool(o.get("on_sale")),
+            "omnibus": omni(o), "ean": _wyciag_ean(o),
+            "img": len(o.get("images") or []),
+            "opis": len(_strip_html(o.get("description"))),
+            "opis_short": len(_strip_html(o.get("short_description"))),
+            "kat": len(o.get("categories") or []),
+            "attrs": len(o.get("attributes") or []),
+            "weight": str(o.get("weight") or "").strip(),
+            "dims": o.get("dimensions") or {},
+        }
+
+    wpisy, zmienne = [], []
+    for p in fetch_all("products", POLA):
+        wpisy.append(entry(p, p.get("type", "simple")))
+        if p.get("type") == "variable":
+            zmienne.append((p["id"], p.get("name", "")))
+
+    if zmienne:
+        def war(pp):
+            pid, pname = pp
+            return pname, fetch_all(f"products/{pid}/variations", POLA_V)
+        with cf.ThreadPoolExecutor(max_workers=8) as ex:
+            for pname, ws in ex.map(war, zmienne):
+                for v in ws:
+                    wpisy.append(entry(v, "variation", pname))
+    return wpisy
+
+
+def audyt_kompletnosci(wpisy, cfg):
+    """cfg: {check_name: bool, 'prog_opis': int}. Zwraca (DataFrame, statystyki)."""
+    wiersze, krytyczne = [], 0
+    for e in wpisy:
+        if not e["sku"]:
+            continue
+        tresc = e["typ"] in ("simple", "variable")   # treść żyje na produkcie
+        cena  = e["typ"] in ("simple", "variation")   # cena/EAN na simple i wariancie
+
+        braki = []  # (opis, "K"/"O")
+        run = 0
+
+        def spr(warunek_braku, opis, waga, aktywne):
+            nonlocal run
+            if not aktywne:
+                return
+            run += 1
+            if warunek_braku:
+                braki.append((opis, waga))
+
+        spr(e["img"] == 0,                 "brak zdjęcia",            "K", cfg["zdjecia"] and tresc)
+        spr(e["opis"] < cfg["prog_opis"],  f"opis <{cfg['prog_opis']} zn.", "K", cfg["opis"] and tresc)
+        spr(e["opis_short"] == 0,          "brak opisu skróconego",  "O", cfg["opis_short"] and tresc)
+        spr(not e["ean"],                  "brak EAN",               "K", cfg["ean"] and cena)
+        spr(e["kat"] == 0,                 "brak kategorii",         "O", cfg["kategorie"] and tresc)
+        spr(not e["weight"] or not all(str(e["dims"].get(k, "")).strip()
+                                       for k in ("length", "width", "height")),
+            "brak wymiarów/wagi", "O", cfg["wymiary"] and tresc)
+        spr(e["regular"] is None or e["regular"] == 0, "brak ceny regularnej", "K",
+            cfg["cena"] and cena)
+        spr(e["on_sale"] and e["omnibus"] is None, "promocja bez omnibusa", "K",
+            cfg["omnibus"] and cena)
+        spr(e["attrs"] == 0,               "brak atrybutów",         "O", cfg["atrybuty"] and tresc)
+        spr(e["status"] != "publish",      f"status: {e['status']}", "K",
+            cfg["status"] and tresc)
+
+        ok = run - len(braki)
+        proc = round(100 * ok / run) if run else 100
+        ma_kryt = any(w == "K" for _, w in braki)
+        if ma_kryt:
+            krytyczne += 1
+        status = ("🔴 KRYTYCZNE" if ma_kryt else
+                  "🟠 BRAKI" if braki else "✅ KOMPLETNE")
+        wiersze.append({
+            "SKU": e["sku"], "Nazwa": e["nazwa"][:60], "Sklep": e["sklep"],
+            "Typ": e["typ"], "Status": status, "Kompletność %": proc,
+            "Braki": ", ".join(f"{'🔴' if w == 'K' else '🟠'} {o}" for o, w in braki) or "—",
+        })
+
+    df = pd.DataFrame(wiersze).sort_values("Kompletność %").reset_index(drop=True) \
+        if wiersze else pd.DataFrame()
+    stat = {"produktow": len(wiersze), "krytyczne": krytyczne,
+            "srednia": round(df["Kompletność %"].mean(), 1) if len(df) else 0}
+    return df, stat
+
+
+# ===========================================================================
 # KOLOROWANIE + EKSPORT
 # ===========================================================================
 
 def koloruj(row):
     status = row["Status"]
-    if "ZGODNE" in status:
-        kolor = "background-color: #EAF3DE"
-    elif "RÓŻNICA" in status:
-        kolor = "background-color: #FBE4E4"
-    elif "OSTRZE" in status:
-        kolor = "background-color: #FFF3CD"
+    if "ZGODNE" in status or "KOMPLETNE" in status:
+        kolor = "background-color: #EAF3DE"          # zielony
+    elif "RÓŻNICA" in status or "KRYTYCZNE" in status:
+        kolor = "background-color: #FBE4E4"          # czerwony
+    elif "OSTRZE" in status or "BRAKI" in status:
+        kolor = "background-color: #FFF3CD"          # żółty
     elif "WYCOFANY" in status:
         kolor = "background-color: #FAEEDA"
     else:
@@ -552,6 +709,72 @@ def do_excela(df):
     with pd.ExcelWriter(buf, engine="openpyxl") as w:
         df.to_excel(w, index=False, sheet_name="Raport")
     return buf.getvalue()
+
+
+# ===========================================================================
+# WIDOK: AUDYT SKLEPU
+# ===========================================================================
+
+def tryb_audyt(wybrane_sklepy):
+    st.subheader("🔎 Audyt kompletności danych produktowych")
+    st.caption("Sprawdza produkty w sklepie — bez wgrywania pliku. Zaznacz, co kontrolować.")
+
+    c = st.columns(4)
+    cfg = {}
+    cfg["zdjecia"]    = c[0].checkbox("Zdjęcia", True)
+    cfg["opis"]       = c[0].checkbox("Opis", True)
+    cfg["opis_short"] = c[0].checkbox("Opis skrócony", False)
+    cfg["ean"]        = c[1].checkbox("EAN / GTIN", True)
+    cfg["kategorie"]  = c[1].checkbox("Kategorie", True)
+    cfg["wymiary"]    = c[1].checkbox("Wymiary / waga", False)
+    cfg["cena"]       = c[2].checkbox("Cena regularna", True)
+    cfg["omnibus"]    = c[2].checkbox("Omnibus w promocji", True)
+    cfg["atrybuty"]   = c[2].checkbox("Atrybuty", False)
+    cfg["status"]     = c[3].checkbox("Status publikacji", True)
+    cfg["prog_opis"]  = c[3].number_input("Min. długość opisu (zn.)", value=200, step=50, min_value=0)
+
+    if st.button("▶️ Uruchom audyt", type="primary"):
+        try:
+            with st.spinner("Pobieram pełne dane produktów..."):
+                wpisy = []
+                for nazwa in wybrane_sklepy:
+                    wpisy.extend(pobierz_audyt_ze_sklepu(nazwa))
+        except Exception as e:
+            st.error(f"Błąd połączenia ze sklepem: {e}")
+            st.stop()
+        df, stat = audyt_kompletnosci(wpisy, cfg)
+        st.session_state["audyt"] = {"df": df, "stat": stat}
+
+    wynik = st.session_state.get("audyt")
+    if not wynik:
+        return
+    df, stat = wynik["df"], wynik["stat"]
+    if df.empty:
+        st.info("Brak produktów do audytu (albo wszystkie kontrole wyłączone).")
+        return
+
+    m1, m2, m3 = st.columns(3)
+    m1.metric("📦 Produktów", stat["produktow"])
+    m2.metric("🔴 Z błędami krytycznymi", stat["krytyczne"])
+    m3.metric("📊 Średnia kompletność", f"{stat['srednia']}%")
+
+    st.divider()
+    KANON = ["🔴 KRYTYCZNE", "🟠 BRAKI", "✅ KOMPLETNE"]
+    obecne = df["Status"].unique().tolist()
+    opcje = KANON + [s for s in obecne if s not in KANON]
+    wyb = st.multiselect("Filtruj status", opcje, default=obecne)
+    widok = df[df["Status"].isin(wyb)]
+
+    st.dataframe(widok.style.apply(koloruj, axis=1), use_container_width=True, height=520)
+
+    a, b = st.columns(2)
+    buf = io.StringIO()
+    df.to_csv(buf, index=False)
+    a.download_button("💾 Pobierz CSV", buf.getvalue(),
+                      file_name="audyt_kompletnosci.csv", mime="text/csv")
+    b.download_button("📊 Pobierz Excel", do_excela(df),
+                      file_name="audyt_kompletnosci.xlsx",
+                      mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
 
 
 # ===========================================================================
@@ -609,6 +832,13 @@ def main():
 
     if not wybrane_sklepy:
         st.warning("Zaznacz przynajmniej jeden sklep w panelu bocznym.")
+        return
+
+    tryb = st.radio("Tryb", ["📄 Weryfikacja z pliku", "🔎 Audyt sklepu"],
+                    horizontal=True, label_visibility="collapsed")
+    st.divider()
+    if tryb.startswith("🔎"):
+        tryb_audyt(wybrane_sklepy)
         return
 
     plik_promo = st.file_uploader("📄 Plik z cenami (CSV / Excel)",
@@ -694,8 +924,10 @@ def main():
 
     st.divider()
     st.subheader("Raport szczegółowy")
-    statusy = pelny["Status"].unique().tolist()
-    wybrane = st.multiselect("Filtruj status", statusy, default=statusy)
+    KANON = ["✅ ZGODNE", "🔴 RÓŻNICA", "🟠 OSTRZEŻENIE", "❓ BRAK NA STRONIE"]
+    obecne = pelny["Status"].unique().tolist()
+    opcje_st = KANON + [s for s in obecne if s not in KANON]
+    wybrane = st.multiselect("Filtruj status (ZGODNE = zielone)", opcje_st, default=obecne)
     widok = pelny[pelny["Status"].isin(wybrane)]
 
     st.dataframe(widok.style.apply(koloruj, axis=1),
