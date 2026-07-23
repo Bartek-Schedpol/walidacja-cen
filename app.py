@@ -806,18 +806,85 @@ def tryb_audyt(wybrane_sklepy):
 # WIDOK: PRZYGOTUJ ZMIANY (plik importu WooCommerce)
 # ===========================================================================
 
-# pole wewn -> (nagłówek CSV importera, klucz rekordu sklepu, czy_cena)
-POLA_IMPORT = [
-    ("Regular", "Regular price", "regular", True),
-    ("Sale",    "Sale price", "sale", True),
-    ("Omnibus", "meta:_price-omnibus", "omnibus", True),
-    ("Data od", "Date sale price starts", "date_from", False),
-    ("Data do", "Date sale price ends", "date_to", False),
-]
-
-
 def _fmt_cena(v):
     return f"{v:.2f}" if v is not None else ""
+
+
+# Kolumny pliku wynikowego — dokładnie format cennika klienta (kolejność ma znaczenie)
+KOLUMNY_EKSPORT = ["ID", "Title", "Parent Product ID", "Product Type", "SKU", "Price",
+                   "Regular Price", "Sale Price", "_price-omnibus",
+                   "Sale Price Dates From", "Sale Price Dates To"]
+
+
+@st.cache_data(ttl=300, show_spinner=False)
+def pobierz_do_eksportu(sklep_nazwa):
+    """Pełne dane do formatu eksportu: produkty (proste + rodzice) oraz warianty,
+    z parent_id, price, nazwą i typem. Zwraca listę wpisów."""
+    cfg = SKLEPY[sklep_nazwa]
+    url    = st.secrets[cfg["url"]].rstrip("/")
+    key    = st.secrets[cfg["key"]]
+    secret = st.secrets[cfg["secret"]]
+    POLA = ("id,sku,name,type,parent_id,price,regular_price,sale_price,on_sale,"
+            "date_on_sale_from,date_on_sale_to,meta_data,global_unique_id")
+    POLA_V = ("id,sku,price,regular_price,sale_price,on_sale,"
+              "date_on_sale_from,date_on_sale_to,meta_data,global_unique_id")
+    sess = requests.Session()
+    sess.auth = (key, secret)
+
+    def _get(endpoint, page, fields):
+        r = sess.get(f"{url}/wp-json/wc/v3/{endpoint}",
+                     params={"per_page": 100, "page": page, "_fields": fields}, timeout=30)
+        if r.status_code == 401:
+            raise RuntimeError(f"[{sklep_nazwa}] 401 — złe klucze API lub brak uprawnień.")
+        if r.status_code != 200:
+            raise RuntimeError(f"[{sklep_nazwa}] API {r.status_code}: {r.text[:200]}")
+        return r
+
+    def fetch_all(endpoint, fields):
+        r = _get(endpoint, 1, fields)
+        out = r.json()
+        total = int(r.headers.get("X-WP-TotalPages", 1))
+        if total > 1:
+            with cf.ThreadPoolExecutor(max_workers=8) as ex:
+                for b in ex.map(lambda p: _get(endpoint, p, fields).json(), range(2, total + 1)):
+                    out.extend(b)
+        return out
+
+    def num(v):
+        try:
+            return round(float(v), 2)
+        except (TypeError, ValueError):
+            return None
+
+    def omni(o):
+        for m in o.get("meta_data", []):
+            if m.get("key") == "_price-omnibus":
+                return num(m.get("value"))
+        return None
+
+    def wpis(o, typ, parent_id, parent_name=""):
+        return {"id": o.get("id"), "sku": (o.get("sku") or "").strip(),
+                "name": o.get("name") or parent_name, "type": typ, "parent_id": parent_id,
+                "price": num(o.get("price")), "regular": num(o.get("regular_price")),
+                "sale": num(o.get("sale_price")), "omnibus": omni(o),
+                "on_sale": bool(o.get("on_sale")), "date_from": o.get("date_on_sale_from"),
+                "date_to": o.get("date_on_sale_to"), "ean": _wyciag_ean_para(o)[0]}
+
+    wpisy, zmienne = [], []
+    for p in fetch_all("products", POLA):
+        typ = p.get("type", "simple")
+        wpisy.append(wpis(p, typ, 0))
+        if typ == "variable":
+            zmienne.append((p["id"], p.get("name", "")))
+    if zmienne:
+        def war(pp):
+            pid, pname = pp
+            return pid, pname, fetch_all(f"products/{pid}/variations", POLA_V)
+        with cf.ThreadPoolExecutor(max_workers=8) as ex:
+            for pid, pname, ws in ex.map(war, zmienne):
+                for v in ws:
+                    wpisy.append(wpis(v, "variation", pid, pname))
+    return wpisy
 
 
 NAZWY_MIES = ["Styczeń", "Luty", "Marzec", "Kwiecień", "Maj", "Czerwiec",
@@ -842,78 +909,107 @@ def wybor_daty(label, key, domyslna):
     return dt.date(rok, mies, dzien)
 
 
-def zbuduj_diff(plik_df, sklep, plik_basis, tryb, vat, ean_header):
-    """Porównuje plik ze sklepem (netto) i buduje: podgląd zmian, plik importu
-    (tylko zmienione SKU, wartości w bazie sklepu) oraz backup obecnych wartości.
-    Puste pole w pliku => zostaje wartość obecna (import nic nie kasuje)."""
-    dostepne = {p for p, _, _, cena in POLA_IMPORT if p in plik_df and plik_df[p].notna().any()}
-    ma_ean = "EAN" in plik_df and plik_df["EAN"].notna().any()
-
-    display, eksport, backup = [], [], []
+def policz_zmiany(plik_df, sku_map, plik_basis, tryb, vat):
+    """Liczy zmiany (porównanie w netto) dla SKU obecnych w sklepie. Zwraca podgląd
+    oraz mapy wartości docelowych i obecnych (w bazie sklepu) dla zmienionych SKU.
+    Puste pole w pliku => zostaje wartość obecna (nic nie kasujemy)."""
+    display = []
+    final_map, backup_map = {}, {}
     stat = {"zmiany": 0, "bez_zmian": 0, "brak": 0}
-
-    def store_val(netto, brutto):
-        return netto if tryb == "netto" else brutto
+    ceny = [("Regular", "regular"), ("Sale", "sale"), ("Omnibus", "omnibus")]
+    daty = [("Data od", "date_from"), ("Data do", "date_to")]
+    dost_cen = {p for p, _ in ceny if p in plik_df and plik_df[p].notna().any()}
+    dost_dat = {p for p, _ in daty if p in plik_df and plik_df[p].notna().any()}
 
     for _, r in plik_df.iterrows():
         sku = r["SKU"]
-        if sku not in sklep:
-            display.append({"SKU": sku, "ID": "—", "Pole": "-",
-                            "Obecna (netto)": "-", "Nowa (netto)": "-", "Status": "❓ BRAK SKU"})
+        if sku not in sku_map:
+            display.append({"SKU": sku, "Pole": "-", "Obecna (netto)": "-",
+                            "Nowa (netto)": "-", "Status": "❓ BRAK SKU"})
             stat["brak"] += 1
             continue
 
-        s = sklep[sku]
-        rek = {"ID": s["id"], "SKU": sku}
-        bak = {"ID": s["id"], "SKU": sku}
+        s = sku_map[sku]
+        final = {"regular": s["regular"], "sale": s["sale"], "omnibus": s["omnibus"],
+                 "date_from": norm_date(s["date_from"]), "date_to": norm_date(s["date_to"])}
+        backup = dict(final)
         zmiana = False
 
-        for pole, header, klucz, cena in POLA_IMPORT:
-            if pole not in dostepne:
+        for pole, klucz in ceny:
+            if pole not in dost_cen:
                 continue
-            if cena:
-                nn, nb = netto_brutto(r.get(pole), plik_basis, vat)   # nowa netto/brutto
-                cur_netto = netto_brutto(s[klucz], tryb, vat)[0]       # obecna netto
-                final = store_val(nn, nb) if nn is not None else s[klucz]
-                rozne = nn is not None and (cur_netto is None or abs(nn - cur_netto) > 0.01)
-                rek[header] = _fmt_cena(final)
-                bak[header] = _fmt_cena(s[klucz])
-                obecna_txt = _fmt_cena(cur_netto) or "brak"
-                nowa_txt = _fmt_cena(nn) if nn is not None else "—"
-            else:
-                nowa = norm_date(r.get(pole))
-                obecna = norm_date(s[klucz])
-                final = nowa if nowa else (obecna or "")
-                rozne = bool(nowa) and nowa != obecna
-                rek[header] = final
-                bak[header] = obecna or ""
-                obecna_txt, nowa_txt = (obecna or "brak"), (nowa or "—")
-            if rozne:
+            nn = netto_brutto(r.get(pole), plik_basis, vat)[0]
+            if nn is None:
+                continue
+            cur = netto_brutto(s[klucz], tryb, vat)[0]
+            final[klucz] = nn if tryb == "netto" else round(nn * (1 + vat / 100.0), 2)
+            if cur is None or abs(nn - cur) > 0.01:
                 zmiana = True
-                display.append({"SKU": sku, "ID": s["id"], "Pole": pole,
-                                "Obecna (netto)": obecna_txt, "Nowa (netto)": nowa_txt,
-                                "Status": "🟠 ZMIANA"})
+                display.append({"SKU": sku, "Pole": pole, "Obecna (netto)": _fmt_cena(cur) or "brak",
+                                "Nowa (netto)": _fmt_cena(nn), "Status": "🟠 ZMIANA"})
 
-        if ma_ean:
-            nowa = str(r.get("EAN") or "").strip()
-            nowa = "" if nowa in ("nan", "None") else nowa
-            obecna = s.get("ean", "")
-            rek[ean_header] = nowa if nowa else obecna
-            bak[ean_header] = obecna
-            if nowa and nowa != obecna:
+        for pole, klucz in daty:
+            if pole not in dost_dat:
+                continue
+            nd = norm_date(r.get(pole))
+            if not nd:
+                continue
+            cur = norm_date(s[klucz])
+            final[klucz] = nd
+            if nd != cur:
                 zmiana = True
-                display.append({"SKU": sku, "ID": s["id"], "Pole": "EAN",
-                                "Obecna (netto)": obecna or "brak", "Nowa (netto)": nowa,
-                                "Status": "🟠 ZMIANA"})
+                display.append({"SKU": sku, "Pole": pole, "Obecna (netto)": cur or "brak",
+                                "Nowa (netto)": nd, "Status": "🟠 ZMIANA"})
 
         if zmiana:
-            eksport.append(rek)
-            backup.append(bak)
+            final_map[sku] = final
+            backup_map[sku] = backup
             stat["zmiany"] += 1
         else:
             stat["bez_zmian"] += 1
 
-    return (pd.DataFrame(display), pd.DataFrame(eksport), pd.DataFrame(backup), stat)
+    return pd.DataFrame(display), final_map, backup_map, stat
+
+
+def zbuduj_csv_wlasny(values_map, wpisy):
+    """Buduje DataFrame w formacie cennika klienta (11 kolumn), z wierszem Parent
+    przed wariantami każdej serii. values_map: {sku: {regular,sale,omnibus,date_from,date_to}}."""
+    from collections import defaultdict
+    sku_e = {e["sku"]: e for e in wpisy if e["sku"]}
+    by_id = {e["id"]: e for e in wpisy}
+    grupy, proste = defaultdict(list), []
+    for sku, vals in values_map.items():
+        e = sku_e.get(sku)
+        if not e:
+            continue
+        if e["type"] == "variation" and e["parent_id"]:
+            grupy[e["parent_id"]].append((e, vals))
+        else:
+            proste.append((e, vals))
+
+    def wiersz(idv, title, parent, sku, price, reg, sale, omn, d1, d2):
+        return {"ID": idv, "Title": title, "Parent Product ID": parent, "Product Type": idv,
+                "SKU": sku, "Price": price, "Regular Price": reg, "Sale Price": sale,
+                "_price-omnibus": omn, "Sale Price Dates From": d1, "Sale Price Dates To": d2}
+
+    def prod(e, vals, title):
+        aktywna = vals.get("sale") if vals.get("sale") is not None else vals.get("regular")
+        return wiersz(e["id"], title, e["parent_id"] or 0, e["sku"], _fmt_cena(aktywna),
+                      _fmt_cena(vals.get("regular")), _fmt_cena(vals.get("sale")),
+                      _fmt_cena(vals.get("omnibus")), vals.get("date_from") or "",
+                      vals.get("date_to") or "")
+
+    rows = []
+    for pid in sorted(grupy, key=lambda x: int(x)):
+        p = by_id.get(pid)
+        if p:                                         # wiersz Parent (seria) przed wariantami
+            rows.append(wiersz(p["id"], p["name"], 0, "", _fmt_cena(p.get("price")),
+                               "", "", "", "", ""))
+        for e, vals in sorted(grupy[pid], key=lambda t: int(t[0]["id"])):
+            rows.append(prod(e, vals, p["name"] if p else e["name"]))
+    for e, vals in sorted(proste, key=lambda t: int(t[0]["id"])):
+        rows.append(prod(e, vals, e["name"]))
+    return pd.DataFrame(rows, columns=KOLUMNY_EKSPORT)
 
 
 def tryb_eksport_zmian(dostepne_sklepy):
@@ -978,19 +1074,19 @@ def tryb_eksport_zmian(dostepne_sklepy):
     if st.button("🔍 Pokaż zmiany (podgląd)", type="primary"):
         try:
             with st.spinner("Pobieram bieżące dane ze sklepu..."):
-                sklep = pobierz_ceny_ze_sklepu(sklep_nazwa)
+                wpisy = pobierz_do_eksportu(sklep_nazwa)
         except Exception as e:
             st.error(f"Błąd połączenia ze sklepem: {e}")
             st.stop()
         kv = pobierz_konfig_vat(sklep_nazwa)
         tryb = kv["tryb"] or "netto"
         vat = kv["vat"] if kv["vat"] is not None else 23.0
-        klucze = [s.get("ean_klucz") for s in sklep.values() if s.get("ean_klucz")]
-        ean_src = max(set(klucze), key=klucze.count) if klucze else "_ean"
-        ean_header = ean_src if ean_src == "global_unique_id" else f"meta:{ean_src}"
-        disp, exp, bak, stat = zbuduj_diff(plik_df, sklep, plik_basis, tryb, vat, ean_header)
+        sku_map = {e["sku"]: e for e in wpisy if e["sku"]}
+        disp, final_map, backup_map, stat = policz_zmiany(plik_df, sku_map, plik_basis, tryb, vat)
+        exp = zbuduj_csv_wlasny(final_map, wpisy)
+        bak = zbuduj_csv_wlasny(backup_map, wpisy)
         st.session_state["eksport"] = {
-            "disp": disp, "exp": exp, "bak": bak, "stat": stat, "ean": ean_header,
+            "disp": disp, "exp": exp, "bak": bak, "stat": stat,
             "sklep": sklep_nazwa, "tryb": tryb,
             "czas": dt.datetime.now().strftime("%d.%m.%Y, godz. %H:%M"),
         }
@@ -1016,17 +1112,16 @@ def tryb_eksport_zmian(dostepne_sklepy):
         st.info("Brak zmian do zapisania — plik zgodny ze sklepem.")
         return
 
-    st.success(f"Plik importu obejmie {len(exp)} produktów ze zmianą "
-               f"(kolumna EAN: {wynik['ean']}).")
+    st.success(f"{stat['zmiany']} produktów ze zmianą · plik importu ma {len(exp)} wierszy "
+               f"(z wierszami Parent serii).")
     c1, c2 = st.columns(2)
-    c1.download_button("📥 Pobierz plik importu (do WooCommerce)", exp.to_csv(index=False),
+    c1.download_button("📥 Pobierz plik importu (format Twojego cennika)", exp.to_csv(index=False),
                        file_name=f"import_{wynik['sklep']}.csv", mime="text/csv", type="primary")
     c2.download_button("🛟 Pobierz backup obecnych wartości", wynik["bak"].to_csv(index=False),
                        file_name=f"backup_{wynik['sklep']}.csv", mime="text/csv")
-    st.warning("⚠️ Zanim zaimportujesz: **zachowaj backup**, przetestuj na 1 produkcie, "
-               "w WooCommerce zaznacz 'Update existing products' i sprawdź na ekranie mapowania "
-               "kolumny **omnibus** oraz **EAN** (mogą wymagać ręcznego przypisania lub — przy "
-               "aktywnej wtyczce omnibus — być liczone automatycznie).")
+    st.warning("⚠️ Zanim zaimportujesz: **zachowaj backup**, przetestuj na 1 serii, sprawdź "
+               "dopasowanie po ID. Format = Twój cennik (11 kolumn, Parent przed wariantami). "
+               "Uwaga: nie ma kolumny EAN — jeśli chcesz aktualizować EAN, powiem jak dodać.")
 
 
 # ===========================================================================

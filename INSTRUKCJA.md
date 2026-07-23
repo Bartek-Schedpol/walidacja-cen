@@ -68,27 +68,33 @@ SCHEDLINE_SECRET = "cs_secret_schedline"
 
 ---
 
-## Tryb „📤 Przygotuj zmiany" — masowa zmiana cen przez import WooCommerce
+## Tryb „📤 Przygotuj zmiany" — masowa zmiana cen (plik w formacie cennika)
 
-Aplikacja **nie zapisuje sama** na sklep (zostaje Read-only). Generuje plik CSV, który
-wgrywasz przez wbudowany import WooCommerce. Kroki:
+Aplikacja **nie zapisuje sama** na sklep (zostaje Read-only). Generuje plik CSV **w Twoim
+formacie cennika** (te same 11 kolumn i kolejność co eksport ze sklepu), który wgrywasz
+przez zwykłe narzędzie importu. Kroki:
 
 1. Wybierz tryb **📤 Przygotuj zmiany** i sklep docelowy.
-2. Wgraj plik z **nowymi** cenami, zmapuj kolumny (SKU, Regular/Sale/Omnibus, daty, EAN).
-3. Kliknij **Pokaż zmiany** — zobaczysz podgląd (dry-run): co się zmieni (obecne vs nowe),
+2. Wgraj plik z **nowymi** cenami, zmapuj kolumny (SKU, Regular/Sale/Omnibus, daty).
+   Daty promocji możesz wziąć z pliku, ustawić ręcznie z kalendarza albo pominąć.
+3. Kliknij **Pokaż zmiany** — podgląd (dry-run): co się zmieni (obecne vs nowe, netto),
    ile SKU bez zmian, które SKU nie istnieją na stronie (pomijane).
 4. Pobierz **plik importu** oraz **backup obecnych wartości** (do cofnięcia w razie czego).
-5. W WooCommerce: **Products → Import** → wskaż plik → zaznacz **„Update existing products"**
-   → na ekranie mapowania potwierdź kolumny (zwłaszcza **omnibus** i **EAN**) → uruchom.
+5. Zaimportuj plik swoim narzędziem, dopasowanie po **ID**.
+
+**Format pliku wynikowego:**
+`ID, Title, Parent Product ID, Product Type, SKU, Price, Regular Price, Sale Price,
+_price-omnibus, Sale Price Dates From, Sale Price Dates To` — z **wierszem Parent (serią)
+przed jej wariantami**. Eksportowane są tylko serie ze zmianą (rodzic + zmienione warianty).
 
 **Zasady bezpieczeństwa:**
-- Eksport zawiera **tylko zmienione produkty**; pozostałe pola są wypełniane obecnymi
-  wartościami, więc import niczego nie kasuje przypadkiem.
-- **Najpierw testuj na 1 produkcie** i trzymaj backup.
-- **Omnibus:** jeśli sklep ma wtyczkę liczącą omnibus automatycznie, ręcznie wypchnięty
-  `_price-omnibus` może zostać nadpisany — sprawdź na 1 produkcie.
-- **EAN:** kolumna to `meta:<klucz>` wykryty ze sklepu (albo `global_unique_id`). Jeśli
-  import nie zaktualizuje EAN, przypisz kolumnę ręcznie na ekranie mapowania importera.
+- Pola niezmieniane są wypełniane obecnymi wartościami → import niczego nie kasuje przypadkiem.
+- Ceny liczone i pokazywane w **netto** (sklep w trybie netto, VAT z API).
+- **Najpierw testuj na 1 serii** i trzymaj backup.
+- **Omnibus:** jeśli sklep ma wtyczkę liczącą omnibus automatycznie, wartość z pliku może
+  zostać nadpisana — sprawdź na 1 produkcie.
+- **EAN:** ten format cennika nie ma kolumny EAN. Jeśli chcesz aktualizować EAN masowo,
+  trzeba dodać osobną kolumnę/ścieżkę — zgłoś zapotrzebowanie.
 
 ---
 
