@@ -933,6 +933,25 @@ def tryb_eksport_zmian(dostepne_sklepy):
     plik_basis = st.radio("Ceny w pliku podane jako", ["netto", "brutto"], index=0,
                           horizontal=True, key="imp_basis")
 
+    # --- daty promocji: z pliku / ręcznie z kalendarza / nie ustawiaj ---
+    st.markdown("**Daty promocji (Data od / Data do)**")
+    zrodlo_dat = st.radio("Źródło dat", ["Z pliku (kolumny)", "Ręcznie (kalendarz)", "Nie ustawiaj"],
+                          horizontal=True, key="imp_daty", label_visibility="collapsed")
+    if zrodlo_dat.startswith("Ręcznie"):
+        d1, d2 = st.columns(2)
+        data_od = d1.date_input("Data od", key="imp_od", format="YYYY-MM-DD")
+        data_do = d2.date_input("Data do", key="imp_do", format="YYYY-MM-DD")
+        plik_df["Data od"] = data_od.strftime("%Y-%m-%d")
+        plik_df["Data do"] = data_do.strftime("%Y-%m-%d")
+        st.caption(f"Daty ustawione ręcznie dla wszystkich zmienianych produktów: "
+                   f"{data_od:%d.%m.%Y} – {data_do:%d.%m.%Y}")
+        if data_do < data_od:
+            st.warning("'Data do' jest wcześniejsza niż 'Data od' — sprawdź zakres.")
+    elif zrodlo_dat.startswith("Nie"):
+        plik_df["Data od"] = None
+        plik_df["Data do"] = None
+    # „Z pliku" → zostawiamy wartości z mapowania bez zmian
+
     if st.button("🔍 Pokaż zmiany (podgląd)", type="primary"):
         try:
             with st.spinner("Pobieram bieżące dane ze sklepu..."):
