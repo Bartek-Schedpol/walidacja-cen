@@ -127,7 +127,12 @@ def wstrzyknij_styl():
 
     /* ---- INPUTY / TAGI ---- */
     input, textarea, [data-baseweb="input"], [data-baseweb="select"]>div { border-radius:10px !important; }
-    [data-baseweb="tag"] { background:var(--akcent) !important; border-radius:7px !important; }
+    /* odsuń zawartość multiselecta od zaokrąglonego rogu (żeby tag nie był przycięty) */
+    [data-baseweb="select"] > div { padding-left:6px !important; }
+    [data-baseweb="tag"] {
+        background:var(--akcent) !important; border-radius:7px !important; margin:2px 3px !important;
+    }
+    [data-baseweb="tag"] span, [data-baseweb="tag"] div { color:#fff !important; }
     [data-testid="stHeader"] { background:transparent; }
     </style>
     """, unsafe_allow_html=True)
@@ -893,13 +898,14 @@ def tryb_audyt(wybrane_sklepy):
 
     st.dataframe(widok.style.apply(koloruj, axis=1), use_container_width=True, height=520)
 
+    st.caption(f"Pobierane pliki zawierają aktualnie przefiltrowane wiersze ({len(widok)}).")
     a, b = st.columns(2)
     buf = io.StringIO()
-    df.to_csv(buf, index=False)
+    widok.to_csv(buf, index=False)
     a.download_button("💾 Pobierz CSV", buf.getvalue(),
                       file_name=f"audyt_kompletnosci_{dt.date.today():%Y-%m-%d}.csv",
                       mime="text/csv")
-    b.download_button("📊 Pobierz Excel", do_excela(df),
+    b.download_button("📊 Pobierz Excel", do_excela(widok),
                       file_name=f"audyt_kompletnosci_{dt.date.today():%Y-%m-%d}.xlsx",
                       mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
 
@@ -1437,13 +1443,15 @@ def main():
     st.dataframe(widok.style.apply(koloruj, axis=1),
                  use_container_width=True, height=500)
 
+    # eksport = to, co widać po filtrze (widok), nie cały raport
+    st.caption(f"Pobierane pliki zawierają aktualnie przefiltrowane wiersze ({len(widok)}).")
     c1, c2 = st.columns(2)
     buf = io.StringIO()
-    pelny.to_csv(buf, index=False)
+    widok.to_csv(buf, index=False)
     c1.download_button("💾 Pobierz CSV", buf.getvalue(),
                        file_name=f"raport_weryfikacji_{dt.date.today():%Y-%m-%d}.csv",
                        mime="text/csv")
-    c2.download_button("📊 Pobierz Excel", do_excela(pelny),
+    c2.download_button("📊 Pobierz Excel", do_excela(widok),
                        file_name=f"raport_weryfikacji_{dt.date.today():%Y-%m-%d}.xlsx",
                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
 
