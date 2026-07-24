@@ -30,6 +30,7 @@ Uruchomienie lokalne:
 """
 
 import io
+import os
 import re
 import hmac
 import calendar
@@ -46,11 +47,19 @@ import streamlit as st
 # KONFIGURACJA STRONY
 # ===========================================================================
 
+WERSJA = "1.0"
+AUTOR = "B. Kokoszanek · Schedpol"
+LOGO = os.path.join(os.path.dirname(os.path.abspath(__file__)), "logo.png")
+
 st.set_page_config(
     page_title="Weryfikator Cen Schedpol / Schedline",
-    page_icon="🔍",
+    page_icon=LOGO if os.path.exists(LOGO) else "🔍",
     layout="wide",
 )
+try:
+    st.logo(LOGO)          # logo marki u góry aplikacji (Streamlit >= 1.35)
+except Exception:
+    pass
 
 # Definicja sklepów: nazwa -> prefiksy kluczy w Secrets
 SKLEPY = {
@@ -1488,3 +1497,11 @@ if str(st.secrets.get("APP_ENABLED", "true")).strip().lower() == "false":
 
 if sprawdz_haslo():
     main()
+
+# ---- stała stopka: wersja + autor ----
+st.markdown(
+    f"<div style='text-align:center;color:#94A3B8;font-size:12px;padding:16px 0 4px;"
+    f"border-top:1px solid #E6EAF0;margin-top:24px'>"
+    f"Weryfikator Cen · wersja {WERSJA} · autor: {AUTOR}</div>",
+    unsafe_allow_html=True,
+)
