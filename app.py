@@ -63,38 +63,72 @@ SKLEPY = {
 # ===========================================================================
 
 def wstrzyknij_styl():
-    """Wstrzykuje CSS: font Plus Jakarta Sans, jasne tło, białe zaokrąglone
-    karty, akcent pomarańczowy. Wyłącznie warstwa wizualna."""
+    """CSS w stylu 'modern dashboard' (inspiracja CoreUI): granatowy sidebar,
+    pomarańczowy akcent Schedpol, białe karty z cieniem, font Inter.
+    Wyłącznie warstwa wizualna — logiki nie zmienia."""
     st.markdown("""
     <style>
-    @import url('https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&display=swap');
-    :root { --akcent:#F15A29; --tekst:#1A1D1F; --tlo:#F4F5F7; --karta:#FFFFFF; }
+    @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap');
+    :root {
+        --akcent:#F15A29; --akcent-hover:#d94a1e;
+        --granat:#1E2A3A; --granat-2:#26364A;
+        --tekst:#1A2230; --muted:#64748B; --tlo:#EEF1F5; --karta:#FFFFFF; --linia:#E6EAF0;
+    }
     html, body, .stApp, [class*="css"] {
-        font-family:'Plus Jakarta Sans','Poppins',system-ui,sans-serif !important;
-        color:var(--tekst);
+        font-family:'Inter',system-ui,-apple-system,sans-serif !important; color:var(--tekst);
     }
     .stApp { background:var(--tlo); }
-    h1,h2,h3 { font-weight:800 !important; letter-spacing:-.02em; }
-    [data-testid="stSidebar"] { background:var(--karta); border-right:1px solid #E9EBEE; }
+    .block-container { padding-top:2rem; }
+    h1,h2,h3 { font-weight:700 !important; letter-spacing:-.01em; color:var(--granat); }
+
+    /* ---- SIDEBAR (granatowy) ---- */
+    [data-testid="stSidebar"] { background:var(--granat); border-right:none; }
+    [data-testid="stSidebar"] h1, [data-testid="stSidebar"] h2, [data-testid="stSidebar"] h3,
+    [data-testid="stSidebar"] label, [data-testid="stSidebar"] p,
+    [data-testid="stSidebar"] [data-testid="stMarkdownContainer"],
+    [data-testid="stSidebar"] [data-testid="stWidgetLabel"] * { color:#E8EDF3 !important; }
+    [data-testid="stSidebar"] small, [data-testid="stSidebar"] [data-testid="stCaptionContainer"] {
+        color:#9DAABB !important;
+    }
+    /* pola formularza w sidebarze zostają czytelne (ciemny tekst na jasnym tle) */
+    [data-testid="stSidebar"] [data-baseweb="select"] > div,
+    [data-testid="stSidebar"] input { background:#fff !important; color:var(--tekst) !important; }
+    /* przyciski w sidebarze: kontur na granacie */
+    [data-testid="stSidebar"] .stButton>button {
+        background:transparent; color:#E8EDF3; border:1px solid #3A4A60;
+    }
+    [data-testid="stSidebar"] .stButton>button:hover { border-color:var(--akcent); color:#fff; }
+
+    /* ---- KARTY / KAFLE ---- */
     [data-testid="stMetric"] {
-        background:var(--karta); border-radius:18px; padding:18px 22px;
-        box-shadow:0 2px 10px rgba(20,20,40,.05); border:1px solid #EDEFF2;
+        background:var(--karta); border-radius:14px; padding:18px 20px;
+        box-shadow:0 1px 3px rgba(16,24,40,.06), 0 1px 2px rgba(16,24,40,.04);
+        border:1px solid var(--linia); border-top:3px solid var(--akcent);
     }
-    [data-testid="stFileUploader"], .stDataFrame, [data-testid="stExpander"] {
-        background:var(--karta); border-radius:18px; border:1px solid #EDEFF2;
+    [data-testid="stMetricValue"] { color:var(--granat); font-weight:700; }
+    [data-testid="stFileUploader"], [data-testid="stExpander"] {
+        background:var(--karta); border-radius:14px; border:1px solid var(--linia);
+        box-shadow:0 1px 3px rgba(16,24,40,.05);
     }
-    [data-testid="stFileUploader"] { padding:10px 14px; }
+    [data-testid="stFileUploader"] { padding:12px 16px; }
+    .stDataFrame { border-radius:14px; border:1px solid var(--linia); overflow:hidden; }
+
+    /* ---- PRZYCISKI ---- */
     .stButton>button, .stDownloadButton>button, .stFormSubmitButton>button {
-        border-radius:12px; font-weight:600; border:1px solid #E3E6EA; padding:.5rem 1.1rem;
+        border-radius:10px; font-weight:600; border:1px solid var(--linia);
+        padding:.5rem 1.1rem; background:#fff; color:var(--granat);
     }
-    .stButton>button[kind="primary"], .stFormSubmitButton>button[kind="primary"] {
-        background:var(--akcent); border:none; color:#fff;
+    .stButton>button[kind="primary"], .stFormSubmitButton>button[kind="primary"],
+    .stDownloadButton>button[kind="primary"] {
+        background:var(--akcent); border:none; color:#fff; box-shadow:0 2px 6px rgba(241,90,41,.35);
     }
-    .stButton>button[kind="primary"]:hover { background:#d94a1e; }
-    input, textarea, [data-baseweb="input"], [data-baseweb="select"]>div {
-        border-radius:12px !important;
-    }
-    [data-baseweb="tag"] { background:var(--akcent) !important; border-radius:8px !important; }
+    .stButton>button[kind="primary"]:hover, .stFormSubmitButton>button[kind="primary"]:hover,
+    .stDownloadButton>button[kind="primary"]:hover { background:var(--akcent-hover); }
+
+    /* ---- INPUTY / TAGI ---- */
+    input, textarea, [data-baseweb="input"], [data-baseweb="select"]>div { border-radius:10px !important; }
+    [data-baseweb="tag"] { background:var(--akcent) !important; border-radius:7px !important; }
+    [data-testid="stHeader"] { background:transparent; }
     </style>
     """, unsafe_allow_html=True)
 
