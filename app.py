@@ -31,6 +31,7 @@ Uruchomienie lokalne:
 
 import io
 import re
+import hmac
 import calendar
 import hashlib
 import datetime as dt
@@ -155,7 +156,9 @@ def sprawdz_haslo():
         haslo = st.text_input("Hasło dostępu", type="password")
         wyslij = st.form_submit_button("Zaloguj", type="primary")
     if wyslij:
-        if haslo and haslo == st.secrets.get("APP_HASLO", ""):
+        prawidlowe = st.secrets.get("APP_HASLO", "")
+        # porównanie odporne na timing-attack
+        if haslo and prawidlowe and hmac.compare_digest(str(haslo), str(prawidlowe)):
             st.session_state["zalogowany"] = True
             st.rerun()
         else:
@@ -209,7 +212,7 @@ def pobierz_ceny_ze_sklepu(sklep_nazwa):
         except ValueError:
             total = 0
         if total > 1:
-            with cf.ThreadPoolExecutor(max_workers=8) as ex:
+            with cf.ThreadPoolExecutor(max_workers=12) as ex:
                 for batch in ex.map(lambda p: _get(endpoint, p, fields).json(),
                                     range(2, total + 1)):
                     out.extend(batch)
@@ -266,7 +269,7 @@ def pobierz_ceny_ze_sklepu(sklep_nazwa):
         return pname, fetch_all(f"products/{pid}/variations", POLA_VAR)
 
     if zmienne:
-        with cf.ThreadPoolExecutor(max_workers=8) as ex:
+        with cf.ThreadPoolExecutor(max_workers=12) as ex:
             for pname, warianty in ex.map(pobierz_warianty, zmienne):
                 for v in warianty:
                     sku = (v.get("sku") or "").strip()
@@ -698,7 +701,7 @@ def pobierz_audyt_ze_sklepu(sklep_nazwa):
         except ValueError:
             total = 0
         if total > 1:
-            with cf.ThreadPoolExecutor(max_workers=8) as ex:
+            with cf.ThreadPoolExecutor(max_workers=12) as ex:
                 for b in ex.map(lambda p: _get(endpoint, p, fields).json(), range(2, total + 1)):
                     out.extend(b)
         elif len(out) >= 100:                      # nagłówek niewiarygodny — stronicuj do skutku
@@ -751,7 +754,7 @@ def pobierz_audyt_ze_sklepu(sklep_nazwa):
         def war(pp):
             pid, pname = pp
             return pname, fetch_all(f"products/{pid}/variations", POLA_V)
-        with cf.ThreadPoolExecutor(max_workers=8) as ex:
+        with cf.ThreadPoolExecutor(max_workers=12) as ex:
             for pname, ws in ex.map(war, zmienne):
                 for v in ws:
                     wpisy.append(entry(v, "variation", pname))
@@ -818,21 +821,26 @@ def audyt_kompletnosci(wpisy, cfg):
 # KOLOROWANIE + EKSPORT
 # ===========================================================================
 
-def koloruj(row):
-    status = row["Status"]
+def _kolor_statusu(status):
+    status = str(status)
     if "ZGODNE" in status or "KOMPLETNE" in status or "data OK" in status:
-        kolor = "background-color: #EAF3DE"          # zielony
-    elif "RÓŻNICA" in status or "KRYTYCZNE" in status or "inna data" in status:
-        kolor = "background-color: #FBE4E4"          # czerwony
-    elif "OSTRZE" in status or "BRAKI" in status or "ZMIANA" in status:
-        kolor = "background-color: #FFF3CD"          # żółty
-    elif "PROMOCJA" in status:
-        kolor = "background-color: #E7F0FA"          # niebieski (info o promocji)
-    elif "WYCOFANY" in status:
-        kolor = "background-color: #FAEEDA"
-    else:
-        kolor = "background-color: #F0F0F0"
-    return [kolor] * len(row)
+        return "background-color: #EAF3DE"           # zielony
+    if "RÓŻNICA" in status or "KRYTYCZNE" in status or "inna data" in status:
+        return "background-color: #FBE4E4"           # czerwony
+    if "OSTRZE" in status or "BRAKI" in status or "ZMIANA" in status:
+        return "background-color: #FFF3CD"           # żółty
+    if "PROMOCJA" in status:
+        return "background-color: #E7F0FA"           # niebieski
+    if "WYCOFANY" in status:
+        return "background-color: #FAEEDA"
+    return "background-color: #F0F0F0"
+
+
+def koloruj(df):
+    """Wektoryzowane kolorowanie (axis=None): kolor liczony raz na wartość statusu
+    i rozprowadzony na wszystkie kolumny — dużo szybsze niż per-wiersz."""
+    css = df["Status"].map(_kolor_statusu)
+    return pd.DataFrame({kol: css.values for kol in df.columns}, index=df.index)
 
 
 def do_excela(df):
@@ -896,7 +904,7 @@ def tryb_audyt(wybrane_sklepy):
     wyb = st.multiselect("Filtruj status", opcje, default=obecne)
     widok = df[df["Status"].isin(wyb)]
 
-    st.dataframe(widok.style.apply(koloruj, axis=1), use_container_width=True, height=520)
+    st.dataframe(widok.style.apply(koloruj, axis=None), use_container_width=True, height=520)
 
     st.caption(f"Pobierane pliki zawierają aktualnie przefiltrowane wiersze ({len(widok)}).")
     a, b = st.columns(2)
@@ -957,7 +965,7 @@ def pobierz_do_eksportu(sklep_nazwa):
         except ValueError:
             total = 0
         if total > 1:
-            with cf.ThreadPoolExecutor(max_workers=8) as ex:
+            with cf.ThreadPoolExecutor(max_workers=12) as ex:
                 for b in ex.map(lambda p: _get(endpoint, p, fields).json(), range(2, total + 1)):
                     out.extend(b)
         elif len(out) >= 100:                      # nagłówek niewiarygodny — stronicuj do skutku
@@ -1002,7 +1010,7 @@ def pobierz_do_eksportu(sklep_nazwa):
         def war(pp):
             pid, pname = pp
             return pid, pname, fetch_all(f"products/{pid}/variations", POLA_V)
-        with cf.ThreadPoolExecutor(max_workers=8) as ex:
+        with cf.ThreadPoolExecutor(max_workers=12) as ex:
             for pid, pname, ws in ex.map(war, zmienne):
                 for v in ws:
                     wpisy.append(wpis(v, "variation", pid, pname))
@@ -1248,7 +1256,7 @@ def tryb_eksport_zmian(dostepne_sklepy):
 
     disp = wynik["disp"]
     if not disp.empty:
-        st.dataframe(disp.style.apply(koloruj, axis=1), use_container_width=True, height=440)
+        st.dataframe(disp.style.apply(koloruj, axis=None), use_container_width=True, height=440)
 
     exp = wynik["exp"]
     if exp.empty:
@@ -1447,7 +1455,7 @@ def main():
     wybrane = st.multiselect("Filtruj status (ZGODNE = zielone)", opcje_st, default=obecne)
     widok = pelny[pelny["Status"].isin(wybrane)]
 
-    st.dataframe(widok.style.apply(koloruj, axis=1),
+    st.dataframe(widok.style.apply(koloruj, axis=None),
                  use_container_width=True, height=500)
 
     # eksport = to, co widać po filtrze (widok), nie cały raport
