@@ -32,6 +32,7 @@ Uruchomienie lokalne:
 import io
 import re
 import calendar
+import hashlib
 import datetime as dt
 import concurrent.futures as cf
 
@@ -379,6 +380,20 @@ def lista_arkuszy(uploaded):
         return pd.ExcelFile(uploaded).sheet_names
     finally:
         uploaded.seek(0)
+
+
+def sygnatura_kolumn(df):
+    """Krótki, stabilny podpis zestawu kolumn — do kluczy widgetów mapowania,
+    żeby nowy plik/układ kolumn wymusił świeże auto-mapowanie (a nie stan z poprzedniego)."""
+    return hashlib.md5("|".join(map(str, df.columns)).encode("utf-8")).hexdigest()[:8]
+
+
+def sygnatura_pliku(uploaded):
+    """Podpis pliku (nazwa + rozmiar) — do kluczy widgetów dostępnych przed odczytem."""
+    try:
+        return hashlib.md5(f"{uploaded.name}|{uploaded.size}".encode("utf-8")).hexdigest()[:8]
+    except Exception:
+        return hashlib.md5(str(uploaded.name).encode("utf-8")).hexdigest()[:8]
 
 
 # Pola docelowe + synonimy do auto-wykrywania kolumn.
@@ -1094,13 +1109,15 @@ def tryb_eksport_zmian(dostepne_sklepy):
     arkusze = lista_arkuszy(plik)
     arkusz = st.selectbox("Arkusz", arkusze, key="imp_ark") if len(arkusze) > 1 \
         else (arkusze[0] if arkusze else None)
+    fsig = sygnatura_pliku(plik)
     auto_hdr = wykryj_wiersz_naglowka(plik, arkusz)
     hdr = st.number_input("Wiersz z nazwami kolumn (nr, od 1)", min_value=1,
-                          value=auto_hdr + 1, step=1, key="imp_hdr") - 1
+                          value=auto_hdr + 1, step=1, key=f"imp_hdr_{fsig}") - 1
     surowy = wczytaj_surowo(plik, arkusz, header_row=hdr)
     st.caption(f"Wczytano {len(surowy)} wierszy.")
 
     st.subheader("🧩 Mapowanie kolumn")
+    sig = sygnatura_kolumn(surowy)   # klucz zależny od pliku -> nowy plik = świeże auto-mapowanie
     auto = auto_mapowanie(list(surowy.columns))
     opcje = ["—"] + list(surowy.columns)
     mapowanie = {}
@@ -1110,7 +1127,7 @@ def tryb_eksport_zmian(dostepne_sklepy):
             dom = auto.get(pole)
             idx = opcje.index(dom) if dom in opcje else 0
             mapowanie[pole] = st.selectbox(ETYKIETY.get(pole, pole), opcje, index=idx,
-                                           key=f"impmap_{pole}")
+                                           key=f"impmap_{pole}_{sig}")
     if mapowanie.get("SKU", "—") == "—":
         st.error("Wskaż kolumnę SKU — bez niej nie ma jak dopasować produktów.")
         return
@@ -1137,6 +1154,17 @@ def tryb_eksport_zmian(dostepne_sklepy):
         plik_df["Data od"] = None
         plik_df["Data do"] = None
     # „Z pliku" → zostawiamy wartości z mapowania bez zmian
+
+    # --- które daty faktycznie zapisać w pliku eksportu ---
+    if not zrodlo_dat.startswith("Nie"):
+        zakres_dat = st.radio("Które daty zapisać w eksporcie",
+                              ["Obie (od i do)", "Tylko Data od", "Tylko Data do"],
+                              horizontal=True, key="imp_zakres_dat",
+                              help="Niewybrana data nie trafia do pliku — zostaje wartość obecna w sklepie.")
+        if zakres_dat == "Tylko Data od":
+            plik_df["Data do"] = None
+        elif zakres_dat == "Tylko Data do":
+            plik_df["Data od"] = None
 
     if st.button("🔍 Pokaż zmiany (podgląd)", type="primary"):
         try:
@@ -1273,9 +1301,10 @@ def main():
     arkusz = st.selectbox("Arkusz", arkusze) if len(arkusze) > 1 else (arkusze[0] if arkusze else None)
 
     # --- wiersz nagłówka (cenniki mają tytuły nad tabelą) ---
+    fsig = sygnatura_pliku(plik_promo)
     auto_hdr = wykryj_wiersz_naglowka(plik_promo, arkusz)
     hdr = st.number_input("Wiersz z nazwami kolumn (nr, licząc od 1)",
-                          min_value=1, value=auto_hdr + 1, step=1,
+                          min_value=1, value=auto_hdr + 1, step=1, key=f"hdr_{fsig}",
                           help="Auto-wykryty. Zmień, jeśli nad tabelą są tytuły/scalone komórki.") - 1
 
     surowy = wczytaj_surowo(plik_promo, arkusz, header_row=hdr)
@@ -1284,6 +1313,7 @@ def main():
     # --- mapowanie kolumn ---
     st.subheader("🧩 Mapowanie kolumn")
     st.caption("Auto-wykryte poniżej — popraw, jeśli któraś kolumna została źle dopasowana. Myślnik (—) oznacza: pomiń pole.")
+    sig = sygnatura_kolumn(surowy)   # klucz zależny od pliku -> nowy plik = świeże auto-mapowanie
     auto = auto_mapowanie(list(surowy.columns))
     opcje = ["—"] + list(surowy.columns)
     mapowanie = {}
@@ -1293,7 +1323,7 @@ def main():
             dom = auto.get(pole)
             idx = opcje.index(dom) if dom in opcje else 0
             mapowanie[pole] = st.selectbox(ETYKIETY.get(pole, pole), opcje, index=idx,
-                                           key=f"map_{pole}")
+                                           key=f"map_{pole}_{sig}")
 
     if mapowanie.get("SKU", "—") == "—":
         st.error("Musisz wskazać kolumnę SKU — bez niej nie ma jak dopasować produktów.")
