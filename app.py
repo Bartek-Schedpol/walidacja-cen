@@ -560,6 +560,8 @@ def porownaj(plik_df, sklep, vat_map, plik_basis, tol, sprawdz_daty,
             f_n = netto_brutto(r.get(pole), plik_basis, vat)[0]
             if f_n is None:                       # pola nie ma w pliku — pomijamy
                 continue
+            if pole == "Omnibus" and not s["on_sale"]:
+                continue                          # omnibus tylko dla produktów w aktywnej promocji
             s_n = netto_brutto(s[klucz], tryb_vat, vat)[0]
             cos_porownano = True
             zgodne = s_n is not None and abs(f_n - s_n) <= tol
@@ -1476,5 +1478,13 @@ def main():
 # ===========================================================================
 
 wstrzyknij_styl()
+
+# ---- zdalny wyłącznik: flaga APP_ENABLED w Streamlit Secrets ----
+# Ustaw APP_ENABLED = "false" w Secrets (z dowolnego komputera), aby zablokować dostęp.
+if str(st.secrets.get("APP_ENABLED", "true")).strip().lower() == "false":
+    st.title("⛔ Aplikacja tymczasowo wyłączona")
+    st.info("Narzędzie zostało wstrzymane przez administratora. Spróbuj później.")
+    st.stop()
+
 if sprawdz_haslo():
     main()
