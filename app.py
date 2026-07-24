@@ -1070,21 +1070,25 @@ def policz_zmiany(plik_df, sku_map, plik_basis, tryb, vat):
                 display.append({"SKU": sku, "Pole": pole, "Obecna (netto)": _fmt_cena(cur) or "brak",
                                 "Nowa (netto)": _fmt_cena(nn), "Status": "🟠 ZMIANA"})
 
-        # daty promocji tylko dla produktów z ceną Sale (w promocji);
-        # bez Sale zostaje wartość obecna (nic nie kasujemy)
+        # daty promocji tylko dla produktów z ceną Sale (w promocji).
+        # Bez Sale => w eksporcie daty PUSTE (czyścimy też odziedziczone ze sklepu).
         ma_sale = final.get("sale") is not None
-        for pole, klucz in daty:
-            if pole not in dost_dat or not ma_sale:
-                continue
-            nd = norm_date(r.get(pole))
-            if not nd:
-                continue
-            cur = norm_date(s[klucz])
-            final[klucz] = nd
-            if nd != cur:
-                zmiana = True
-                display.append({"SKU": sku, "Pole": pole, "Obecna (netto)": cur or "brak",
-                                "Nowa (netto)": nd, "Status": "🟠 ZMIANA"})
+        if ma_sale:
+            for pole, klucz in daty:
+                if pole not in dost_dat:
+                    continue
+                nd = norm_date(r.get(pole))
+                if not nd:
+                    continue
+                cur = norm_date(s[klucz])
+                final[klucz] = nd
+                if nd != cur:
+                    zmiana = True
+                    display.append({"SKU": sku, "Pole": pole, "Obecna (netto)": cur or "brak",
+                                    "Nowa (netto)": nd, "Status": "🟠 ZMIANA"})
+        else:
+            final["date_from"] = ""
+            final["date_to"] = ""
 
         if zmiana:
             final_map[sku] = final
