@@ -47,7 +47,7 @@ import streamlit as st
 # KONFIGURACJA STRONY
 # ===========================================================================
 
-WERSJA = "1.0"
+WERSJA = "1.1"
 AUTOR = "B. Kokoszanek · Schedpol"
 LOGO = os.path.join(os.path.dirname(os.path.abspath(__file__)), "logo.png")
 
@@ -73,76 +73,98 @@ SKLEPY = {
 # ===========================================================================
 
 def wstrzyknij_styl():
-    """CSS w stylu 'modern dashboard' (inspiracja CoreUI): granatowy sidebar,
-    pomarańczowy akcent Schedpol, białe karty z cieniem, font Inter.
+    """CSS wg DESIGN.md — Bauhaus / neo-brutalizm: grube czarne ramki, offsetowe
+    cienie, płaskie bloki koloru, zero zaokrągleń, Space Grotesk + Inter.
     Wyłącznie warstwa wizualna — logiki nie zmienia."""
     st.markdown("""
     <style>
-    @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap');
+    @import url('https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;700&family=Inter:wght@400;500;700&display=swap');
     :root {
-        --akcent:#F15A29; --akcent-hover:#d94a1e;
-        --granat:#1E2A3A; --granat-2:#26364A;
-        --tekst:#1A2230; --muted:#64748B; --tlo:#EEF1F5; --karta:#FFFFFF; --linia:#E6EAF0;
+        --czern:#1a1a1a; --zolty:#ffcc00; --czerwony:#e63b2e; --niebieski:#0055ff;
+        --papier:#f5f0e8; --biel:#ffffff;
+        --ramka:3px solid #1a1a1a; --offset:5px 5px 0 #1a1a1a;
     }
     html, body, .stApp, [class*="css"] {
-        font-family:'Inter',system-ui,-apple-system,sans-serif !important; color:var(--tekst);
+        font-family:'Inter',system-ui,sans-serif !important; color:var(--czern);
     }
-    .stApp { background:var(--tlo); }
+    .stApp { background:var(--papier); }
     .block-container { padding-top:2rem; }
-    h1,h2,h3 { font-weight:700 !important; letter-spacing:-.01em; color:var(--granat); }
+    h1,h2,h3 {
+        font-family:'Space Grotesk',sans-serif !important; font-weight:700 !important;
+        letter-spacing:-.03em; color:var(--czern); text-transform:uppercase;
+    }
+    h1 { font-size:2.9rem !important; line-height:1.05; }
+    h2 { font-size:1.9rem !important; }
+    h3 { font-size:1.35rem !important; }
+    hr, [data-testid="stDivider"] hr { border:none; border-top:var(--ramka); }
 
-    /* ---- SIDEBAR (granatowy) ---- */
-    [data-testid="stSidebar"] { background:var(--granat); border-right:none; }
+    /* ---- SIDEBAR: blok czerni ---- */
+    [data-testid="stSidebar"] { background:var(--czern); border-right:var(--ramka); }
     [data-testid="stSidebar"] h1, [data-testid="stSidebar"] h2, [data-testid="stSidebar"] h3,
     [data-testid="stSidebar"] label, [data-testid="stSidebar"] p,
     [data-testid="stSidebar"] [data-testid="stMarkdownContainer"],
-    [data-testid="stSidebar"] [data-testid="stWidgetLabel"] * { color:#E8EDF3 !important; }
-    [data-testid="stSidebar"] small, [data-testid="stSidebar"] [data-testid="stCaptionContainer"] {
-        color:#9DAABB !important;
+    [data-testid="stSidebar"] [data-testid="stWidgetLabel"] * { color:var(--papier) !important; }
+    [data-testid="stSidebar"] h1, [data-testid="stSidebar"] h2, [data-testid="stSidebar"] h3 {
+        color:var(--zolty) !important;
     }
-    /* pola formularza w sidebarze zostają czytelne (ciemny tekst na jasnym tle) */
+    [data-testid="stSidebar"] [data-testid="stCaptionContainer"] { color:#b8b0a2 !important; }
     [data-testid="stSidebar"] [data-baseweb="select"] > div,
-    [data-testid="stSidebar"] input { background:#fff !important; color:var(--tekst) !important; }
-    /* przyciski w sidebarze: kontur na granacie */
+    [data-testid="stSidebar"] input {
+        background:var(--biel) !important; color:var(--czern) !important; border:2px solid var(--czern) !important;
+    }
     [data-testid="stSidebar"] .stButton>button {
-        background:transparent; color:#E8EDF3; border:1px solid #3A4A60;
+        background:var(--czern); color:var(--zolty); border:2px solid var(--zolty);
     }
-    [data-testid="stSidebar"] .stButton>button:hover { border-color:var(--akcent); color:#fff; }
+    [data-testid="stSidebar"] .stButton>button:hover { background:var(--zolty); color:var(--czern); }
 
-    /* ---- KARTY / KAFLE ---- */
+    /* ---- KARTY: gruba ramka + offsetowy cień, bez zaokrągleń ---- */
     [data-testid="stMetric"] {
-        background:var(--karta); border-radius:14px; padding:18px 20px;
-        box-shadow:0 1px 3px rgba(16,24,40,.06), 0 1px 2px rgba(16,24,40,.04);
-        border:1px solid var(--linia); border-top:3px solid var(--akcent);
+        background:var(--biel); border:var(--ramka); border-radius:0;
+        box-shadow:var(--offset); padding:18px 20px;
     }
-    [data-testid="stMetricValue"] { color:var(--granat); font-weight:700; }
+    [data-testid="stMetricValue"] {
+        font-family:'Space Grotesk',sans-serif !important; font-weight:700; font-size:2.4rem !important;
+        color:var(--czern);
+    }
+    [data-testid="stMetricLabel"] * { text-transform:uppercase; font-weight:700; font-size:.78rem; }
     [data-testid="stFileUploader"], [data-testid="stExpander"] {
-        background:var(--karta); border-radius:14px; border:1px solid var(--linia);
-        box-shadow:0 1px 3px rgba(16,24,40,.05);
+        background:var(--biel); border:var(--ramka); border-radius:0; box-shadow:var(--offset);
     }
-    [data-testid="stFileUploader"] { padding:12px 16px; }
-    .stDataFrame { border-radius:14px; border:1px solid var(--linia); overflow:hidden; }
+    [data-testid="stFileUploader"] { padding:14px 16px; }
+    .stDataFrame { border:var(--ramka); border-radius:0; box-shadow:var(--offset); overflow:hidden; }
+    [data-testid="stAlert"] { border:var(--ramka); border-radius:0; box-shadow:var(--offset); }
 
-    /* ---- PRZYCISKI ---- */
+    /* ---- PRZYCISKI: solidny blok, wersaliki, hover = inwersja ---- */
     .stButton>button, .stDownloadButton>button, .stFormSubmitButton>button {
-        border-radius:10px; font-weight:600; border:1px solid var(--linia);
-        padding:.5rem 1.1rem; background:#fff; color:var(--granat);
+        border-radius:0; font-weight:700; text-transform:uppercase; letter-spacing:.04em;
+        border:var(--ramka); padding:.55rem 1.2rem; background:var(--biel); color:var(--czern);
+        box-shadow:4px 4px 0 var(--czern); transition:none;
+    }
+    .stButton>button:hover, .stDownloadButton>button:hover, .stFormSubmitButton>button:hover {
+        background:var(--czern); color:var(--papier);
     }
     .stButton>button[kind="primary"], .stFormSubmitButton>button[kind="primary"],
     .stDownloadButton>button[kind="primary"] {
-        background:var(--akcent); border:none; color:#fff; box-shadow:0 2px 6px rgba(241,90,41,.35);
+        background:var(--zolty); color:var(--czern); border:var(--ramka);
     }
     .stButton>button[kind="primary"]:hover, .stFormSubmitButton>button[kind="primary"]:hover,
-    .stDownloadButton>button[kind="primary"]:hover { background:var(--akcent-hover); }
+    .stDownloadButton>button[kind="primary"]:hover { background:var(--czern); color:var(--zolty); }
+    .stButton>button:active, .stDownloadButton>button:active, .stFormSubmitButton>button:active {
+        box-shadow:0 0 0 var(--czern); transform:translate(4px,4px);
+    }
 
-    /* ---- INPUTY / TAGI ---- */
-    input, textarea, [data-baseweb="input"], [data-baseweb="select"]>div { border-radius:10px !important; }
-    /* odsuń zawartość multiselecta od zaokrąglonego rogu (żeby tag nie był przycięty) */
+    /* ---- INPUTY: gruba dolna krawędź, brak zaokrągleń ---- */
+    input, textarea, [data-baseweb="input"], [data-baseweb="select"]>div,
+    [data-testid="stNumberInput"] input { border-radius:0 !important; }
+    [data-baseweb="input"], [data-baseweb="select"]>div {
+        border:2px solid var(--czern) !important; background:var(--biel) !important;
+    }
     [data-baseweb="select"] > div { padding-left:6px !important; }
     [data-baseweb="tag"] {
-        background:var(--akcent) !important; border-radius:7px !important; margin:2px 3px !important;
+        background:var(--niebieski) !important; border-radius:0 !important; margin:2px 3px !important;
+        border:2px solid var(--czern) !important;
     }
-    [data-baseweb="tag"] span, [data-baseweb="tag"] div { color:#fff !important; }
+    [data-baseweb="tag"] span, [data-baseweb="tag"] div { color:var(--biel) !important; font-weight:700; }
     [data-testid="stHeader"] { background:transparent; }
     </style>
     """, unsafe_allow_html=True)
@@ -833,18 +855,19 @@ def audyt_kompletnosci(wpisy, cfg):
 # ===========================================================================
 
 def _kolor_statusu(status):
+    """Płaskie bloki koloru z palety Bauhaus (bez półprzezroczystości i gradientów)."""
     status = str(status)
     if "ZGODNE" in status or "KOMPLETNE" in status or "data OK" in status:
-        return "background-color: #EAF3DE"           # zielony
+        return "background-color: #cfe8bd"           # zieleń (ok)
     if "RÓŻNICA" in status or "KRYTYCZNE" in status or "inna data" in status:
-        return "background-color: #FBE4E4"           # czerwony
+        return "background-color: #f7c9c4"           # czerwień #e63b2e (tint)
     if "OSTRZE" in status or "BRAKI" in status or "ZMIANA" in status:
-        return "background-color: #FFF3CD"           # żółty
+        return "background-color: #ffe58a"           # żółty #ffcc00 (tint)
     if "PROMOCJA" in status:
-        return "background-color: #E7F0FA"           # niebieski
+        return "background-color: #c7d8ff"           # niebieski #0055ff (tint)
     if "WYCOFANY" in status:
-        return "background-color: #FAEEDA"
-    return "background-color: #F0F0F0"
+        return "background-color: #f0d9b8"
+    return "background-color: #e5ded2"               # papier (neutralny)
 
 
 def koloruj(df):
@@ -1500,8 +1523,9 @@ if sprawdz_haslo():
 
 # ---- stała stopka: wersja + autor ----
 st.markdown(
-    f"<div style='text-align:center;color:#94A3B8;font-size:12px;padding:16px 0 4px;"
-    f"border-top:1px solid #E6EAF0;margin-top:24px'>"
-    f"Weryfikator Cen · wersja {WERSJA} · autor: {AUTOR}</div>",
+    f"<div style='text-align:center;color:#1a1a1a;font-size:11px;font-weight:700;"
+    f"letter-spacing:.08em;text-transform:uppercase;padding:14px 0 4px;"
+    f"border-top:3px solid #1a1a1a;margin-top:28px'>"
+    f"Weryfikator Cen &nbsp;·&nbsp; wersja {WERSJA} &nbsp;·&nbsp; autor: {AUTOR}</div>",
     unsafe_allow_html=True,
 )
