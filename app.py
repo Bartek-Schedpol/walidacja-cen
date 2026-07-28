@@ -47,7 +47,7 @@ import streamlit as st
 # KONFIGURACJA STRONY
 # ===========================================================================
 
-WERSJA = "1.2"
+WERSJA = "1.3"
 AUTOR = "B. Kokoszanek · Schedpol"
 LOGO = os.path.join(os.path.dirname(os.path.abspath(__file__)), "logo.png")
 
@@ -73,52 +73,51 @@ SKLEPY = {
 # ===========================================================================
 
 def wstrzyknij_styl():
-    """CSS w stylu 'modern dashboard' (inspiracja CoreUI): granatowy sidebar,
-    pomarańczowy akcent Schedpol, białe karty z cieniem, font Inter.
-    Wyłącznie warstwa wizualna — logiki nie zmienia."""
+    """CSS 'modern dashboard' z niebieskim akcentem — obsługuje jasny i ciemny
+    motyw (tokeny przełączane przez prefers-color-scheme, zgodnie z systemem/
+    przeglądarką użytkownika). Wyłącznie warstwa wizualna — logiki nie zmienia."""
     st.markdown("""
     <style>
     @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap');
     :root {
-        --akcent:#F15A29; --akcent-hover:#d94a1e;
-        --granat:#1E2A3A; --granat-2:#26364A;
-        --tekst:#1A2230; --muted:#64748B; --tlo:#EEF1F5; --karta:#FFFFFF; --linia:#E6EAF0;
+        --akcent:#2F6FED; --akcent-hover:#1F57C9; --akcent-tekst:#FFFFFF;
+        --tlo:#F6F7F9; --karta:#FFFFFF; --linia:#E4E7EC;
+        --tekst:#101828; --muted:#667085;
+        --cien:0 1px 2px rgba(16,24,40,.04), 0 1px 3px rgba(16,24,40,.06);
+    }
+    @media (prefers-color-scheme: dark) {
+        :root {
+            --akcent:#4C8DFF; --akcent-hover:#6BA1FF; --akcent-tekst:#0B0F17;
+            --tlo:#0B0F17; --karta:#121826; --linia:#232B3A;
+            --tekst:#F0F2F5; --muted:#94A0B4;
+            --cien:0 1px 3px rgba(0,0,0,.5);
+        }
     }
     html, body, .stApp, [class*="css"] {
         font-family:'Inter',system-ui,-apple-system,sans-serif !important; color:var(--tekst);
     }
     .stApp { background:var(--tlo); }
     .block-container { padding-top:2rem; }
-    h1,h2,h3 { font-weight:700 !important; letter-spacing:-.01em; color:var(--granat); }
+    h1,h2,h3 { font-weight:700 !important; letter-spacing:-.01em; color:var(--tekst); }
+    [data-testid="stCaptionContainer"], small { color:var(--muted) !important; }
 
-    /* ---- SIDEBAR (granatowy) ---- */
-    [data-testid="stSidebar"] { background:var(--granat); border-right:none; }
-    [data-testid="stSidebar"] h1, [data-testid="stSidebar"] h2, [data-testid="stSidebar"] h3,
-    [data-testid="stSidebar"] label, [data-testid="stSidebar"] p,
-    [data-testid="stSidebar"] [data-testid="stMarkdownContainer"],
-    [data-testid="stSidebar"] [data-testid="stWidgetLabel"] * { color:#E8EDF3 !important; }
-    [data-testid="stSidebar"] small, [data-testid="stSidebar"] [data-testid="stCaptionContainer"] {
-        color:#9DAABB !important;
-    }
-    /* pola formularza w sidebarze zostają czytelne (ciemny tekst na jasnym tle) */
+    /* ---- SIDEBAR: zlewa się z tłem, nie jest już osobnym blokiem koloru ---- */
+    [data-testid="stSidebar"] { background:var(--karta); border-right:1px solid var(--linia); }
     [data-testid="stSidebar"] [data-baseweb="select"] > div,
-    [data-testid="stSidebar"] input { background:#fff !important; color:var(--tekst) !important; }
-    /* przyciski w sidebarze: kontur na granacie */
-    [data-testid="stSidebar"] .stButton>button {
-        background:transparent; color:#E8EDF3; border:1px solid #3A4A60;
+    [data-testid="stSidebar"] input {
+        background:var(--karta) !important; color:var(--tekst) !important; border-color:var(--linia) !important;
     }
-    [data-testid="stSidebar"] .stButton>button:hover { border-color:var(--akcent); color:#fff; }
+    [data-testid="stSidebar"] .stButton>button { background:var(--karta); color:var(--tekst); border:1px solid var(--linia); }
+    [data-testid="stSidebar"] .stButton>button:hover { border-color:var(--akcent); color:var(--akcent); }
 
     /* ---- KARTY / KAFLE ---- */
     [data-testid="stMetric"] {
         background:var(--karta); border-radius:14px; padding:18px 20px;
-        box-shadow:0 1px 3px rgba(16,24,40,.06), 0 1px 2px rgba(16,24,40,.04);
-        border:1px solid var(--linia); border-top:3px solid var(--akcent);
+        box-shadow:var(--cien); border:1px solid var(--linia); border-top:3px solid var(--akcent);
     }
-    [data-testid="stMetricValue"] { color:var(--granat); font-weight:700; }
+    [data-testid="stMetricValue"] { color:var(--tekst); font-weight:700; }
     [data-testid="stFileUploader"], [data-testid="stExpander"] {
-        background:var(--karta); border-radius:14px; border:1px solid var(--linia);
-        box-shadow:0 1px 3px rgba(16,24,40,.05);
+        background:var(--karta); border-radius:14px; border:1px solid var(--linia); box-shadow:var(--cien);
     }
     [data-testid="stFileUploader"] { padding:12px 16px; }
     .stDataFrame { border-radius:14px; border:1px solid var(--linia); overflow:hidden; }
@@ -126,23 +125,25 @@ def wstrzyknij_styl():
     /* ---- PRZYCISKI ---- */
     .stButton>button, .stDownloadButton>button, .stFormSubmitButton>button {
         border-radius:10px; font-weight:600; border:1px solid var(--linia);
-        padding:.5rem 1.1rem; background:#fff; color:var(--granat);
+        padding:.5rem 1.1rem; background:var(--karta); color:var(--tekst);
     }
     .stButton>button[kind="primary"], .stFormSubmitButton>button[kind="primary"],
     .stDownloadButton>button[kind="primary"] {
-        background:var(--akcent); border:none; color:#fff; box-shadow:0 2px 6px rgba(241,90,41,.35);
+        background:var(--akcent); border:none; color:var(--akcent-tekst);
+        box-shadow:0 2px 6px rgba(47,111,237,.30);
     }
     .stButton>button[kind="primary"]:hover, .stFormSubmitButton>button[kind="primary"]:hover,
     .stDownloadButton>button[kind="primary"]:hover { background:var(--akcent-hover); }
 
     /* ---- INPUTY / TAGI ---- */
     input, textarea, [data-baseweb="input"], [data-baseweb="select"]>div { border-radius:10px !important; }
+    [data-baseweb="input"], [data-baseweb="select"]>div { background:var(--karta) !important; border-color:var(--linia) !important; }
     /* odsuń zawartość multiselecta od zaokrąglonego rogu (żeby tag nie był przycięty) */
     [data-baseweb="select"] > div { padding-left:6px !important; }
     [data-baseweb="tag"] {
         background:var(--akcent) !important; border-radius:7px !important; margin:2px 3px !important;
     }
-    [data-baseweb="tag"] span, [data-baseweb="tag"] div { color:#fff !important; }
+    [data-baseweb="tag"] span, [data-baseweb="tag"] div { color:var(--akcent-tekst) !important; }
     [data-testid="stHeader"] { background:transparent; }
     </style>
     """, unsafe_allow_html=True)
@@ -833,18 +834,21 @@ def audyt_kompletnosci(wpisy, cfg):
 # ===========================================================================
 
 def _kolor_statusu(status):
+    """Pastelowe tła + wymuszony ciemny tekst — czytelne niezależnie od tego,
+    czy strona jest w jasnym czy ciemnym motywie (kolor komórki jest zawsze
+    jasny, więc tekst musi być zawsze ciemny, bez dziedziczenia z motywu)."""
     status = str(status)
     if "ZGODNE" in status or "KOMPLETNE" in status or "data OK" in status:
-        return "background-color: #EAF3DE"           # zielony
+        return "background-color: #EAF3DE; color: #234D1F"      # zielony
     if "RÓŻNICA" in status or "KRYTYCZNE" in status or "inna data" in status:
-        return "background-color: #FBE4E4"           # czerwony
+        return "background-color: #FBE4E4; color: #7A1F1F"      # czerwony
     if "OSTRZE" in status or "BRAKI" in status or "ZMIANA" in status:
-        return "background-color: #FFF3CD"           # żółty
+        return "background-color: #FFF3CD; color: #6B5300"      # żółty
     if "PROMOCJA" in status:
-        return "background-color: #E7F0FA"           # niebieski
+        return "background-color: #E7F0FA; color: #1F3A5C"      # niebieski
     if "WYCOFANY" in status:
-        return "background-color: #FAEEDA"
-    return "background-color: #F0F0F0"
+        return "background-color: #FAEEDA; color: #6B4A1F"
+    return "background-color: #F0F0F0; color: #1a1a1a"
 
 
 def koloruj(df):
@@ -1500,8 +1504,8 @@ if sprawdz_haslo():
 
 # ---- stała stopka: wersja + autor ----
 st.markdown(
-    f"<div style='text-align:center;color:#94A3B8;font-size:12px;padding:16px 0 4px;"
-    f"border-top:1px solid #E6EAF0;margin-top:24px'>"
+    f"<div style='text-align:center;color:var(--muted,#94A3B8);font-size:12px;padding:16px 0 4px;"
+    f"border-top:1px solid var(--linia,#E6EAF0);margin-top:24px'>"
     f"Weryfikator Cen · wersja {WERSJA} · autor: {AUTOR}</div>",
     unsafe_allow_html=True,
 )
