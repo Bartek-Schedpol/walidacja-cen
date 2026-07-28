@@ -47,7 +47,7 @@ import streamlit as st
 # KONFIGURACJA STRONY
 # ===========================================================================
 
-WERSJA = "1.0"
+WERSJA = "1.2"
 AUTOR = "B. Kokoszanek · Schedpol"
 LOGO = os.path.join(os.path.dirname(os.path.abspath(__file__)), "logo.png")
 
