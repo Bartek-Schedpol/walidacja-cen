@@ -47,7 +47,7 @@ import streamlit as st
 # KONFIGURACJA STRONY
 # ===========================================================================
 
-WERSJA = "1.7"
+WERSJA = "1.8"
 AUTOR = "B. Kokoszanek · Schedpol"
 LOGO = os.path.join(os.path.dirname(os.path.abspath(__file__)), "logo.png")
 
@@ -1358,8 +1358,18 @@ def tryb_eksport_zmian(dostepne_sklepy):
                        file_name=f"backup_{wynik['sklep']}_{dt.date.today():%Y-%m-%d}.csv",
                        mime="text/csv")
     st.warning("⚠️ Zanim zaimportujesz: **zachowaj backup**, przetestuj na 1 serii, sprawdź "
-               "dopasowanie po ID. Format = Twój cennik (11 kolumn, Parent przed wariantami). "
+               "dopasowanie po ID. Format = Twój cennik (Parent przed wariantami). "
                "Uwaga: nie ma kolumny EAN — jeśli chcesz aktualizować EAN, powiem jak dodać.")
+    st.info(
+        "🔗 **Mapowanie Custom Fields w WP All Import** — pole *Value* musi wskazywać "
+        "dokładnie na nazwę kolumny z tego pliku, inaczej import zapisze **puste wartości**:\n\n"
+        "| Name (klucz meta) | Value (placeholder) |\n"
+        "|---|---|\n"
+        "| `_price-omnibus` | `{_priceomnibus[1]}` |\n"
+        f"| `{META_DOSTEPNOSC}` | `{{{META_DOSTEPNOSC}[1]}}` |\n\n"
+        "Oba klucze muszą też być na liście **„Update only these Custom Fields”** "
+        "(Settings → Update existing posts), inaczej import je pominie."
+    )
 
 
 # ===========================================================================
