@@ -47,7 +47,7 @@ import streamlit as st
 # KONFIGURACJA STRONY
 # ===========================================================================
 
-WERSJA = "1.5"
+WERSJA = "1.6"
 AUTOR = "B. Kokoszanek · Schedpol"
 LOGO = os.path.join(os.path.dirname(os.path.abspath(__file__)), "logo.png")
 
@@ -66,6 +66,10 @@ SKLEPY = {
     "schedpol.pl":  {"url": "SCHEDPOL_URL",  "key": "SCHEDPOL_KEY",  "secret": "SCHEDPOL_SECRET"},
     "schedline.pl": {"url": "SCHEDLINE_URL", "key": "SCHEDLINE_KEY", "secret": "SCHEDLINE_SECRET"},
 }
+
+# Oznaczenie dostępności magazynowej (wtyczka mu-plugin po stronie WooCommerce)
+META_DOSTEPNOSC = "_dostepnosc_magazynowa"
+KODY_DOSTEPNOSCI = ("A", "B", "C", "I")
 
 
 # ===========================================================================
@@ -180,6 +184,15 @@ def sprawdz_haslo():
 # POBIERANIE CEN ZE SKLEPU (WooCommerce REST API)
 # ===========================================================================
 
+def _wyciag_dostepnosc(obj):
+    """Kod dostępności (A/B/C/I) z meta `_dostepnosc_magazynowa`.
+    WooCommerce zwraca meta z prefiksem `_` w meta_data — tak samo jak omnibus."""
+    for m in obj.get("meta_data", []):
+        if m.get("key") == META_DOSTEPNOSC:
+            return str(m.get("value") or "").strip().upper()
+    return ""
+
+
 @st.cache_data(ttl=300, show_spinner=False)
 def pobierz_ceny_ze_sklepu(sklep_nazwa):
     """
@@ -263,6 +276,7 @@ def pobierz_ceny_ze_sklepu(sklep_nazwa):
             "date_to":   obj.get("date_on_sale_to"),
             "ean":       ean,
             "ean_klucz": ean_klucz,
+            "dostepnosc": _wyciag_dostepnosc(obj),
         }
 
     sklep, zmienne = {}, []
@@ -462,19 +476,27 @@ POLA = {
                 "poczatek promocji", "date from"],
     "Data do": ["sale price dates to", "data do", "obowiazuje do", "koniec promocji",
                 "date to"],
+    "Dostępność": ["dostepnosc magazynowa", "oznaczenie dostepnosci", "dostepnosci",
+                   "dostepnosc", "availability", "magazyn"],
 }
 
 
 # Przyjazne etykiety pól w UI (klucze POLA zostają wewnętrzne — nie zmieniać!)
 ETYKIETY = {
-    "Regular": "Regular (katalogowa netto)",
-    "Sale":    "Sale (promocyjna netto)",
-    "Omnibus": "Omnibus (netto)",
+    "Regular":     "Regular (katalogowa netto)",
+    "Sale":        "Sale (promocyjna netto)",
+    "Omnibus":     "Omnibus (netto)",
+    "Dostępność":  "Dostępność (A/B/C/I)",
 }
 
 
+_PL_ZNAKI = str.maketrans("ąćęłńóśźż", "acelnoszz")
+
+
 def _uprosc(s):
-    return re.sub(r"[^a-z0-9]+", " ", str(s).lower()).strip()
+    """Normalizacja nazwy kolumny do porównań. Polskie znaki są transliterowane —
+    bez tego 'dostępności' rozpadało się na 'dost pno ci' i psuło auto-mapowanie."""
+    return re.sub(r"[^a-z0-9]+", " ", str(s).lower().translate(_PL_ZNAKI)).strip()
 
 
 def auto_mapowanie(kolumny):
@@ -520,6 +542,9 @@ def normalizuj(df, mapowanie):
     out["Data od"] = df[m["Data od"]] if "Data od" in m else None
     out["Data do"] = df[m["Data do"]] if "Data do" in m else None
     out["EAN"] = df[m["EAN"]].astype(str).str.strip() if "EAN" in m else None
+    # dostępność: pole tekstowe A/B/C/I — normalizujemy do wielkich liter
+    out["Dostępność"] = (df[m["Dostępność"]].astype(str).str.strip().str.upper()
+                         if "Dostępność" in m else None)
 
     # prawdziwy kod produktu: niepusty, bez spacji, rozsądnej długości.
     # Odsiewa wiersze-nagłówki/legendy (np. "ORIENTACYJNA DOSTĘPNOŚĆ...").
@@ -582,6 +607,29 @@ def porownaj(plik_df, sklep, vat_map, plik_basis, tol, sprawdz_daty,
                 "Status": "✅ ZGODNE" if zgodne else "🔴 RÓŻNICA",
                 "Pole": pole, "Na stronie (netto)": wart(s_n), "W pliku (netto)": wart(f_n),
             })
+
+        # dostępność — pole TEKSTOWE (A/B/C/I), porównanie wprost, bez przeliczeń VAT
+        f_d = str(r.get("Dostępność") or "").strip().upper()
+        if f_d and f_d not in ("NAN", "NONE"):
+            s_d = s.get("dostepnosc", "")
+            cos_porownano = True
+            if f_d not in KODY_DOSTEPNOSCI:
+                ma_roznice = True
+                wiersze.append({
+                    "SKU": sku, "Sklep": s["sklep"], "Status": "🔴 RÓŻNICA",
+                    "Pole": "Dostępność — niedozwolony kod w pliku",
+                    "Na stronie (netto)": s_d or "brak", "W pliku (netto)": f_d,
+                })
+            else:
+                zgodne = (f_d == s_d)
+                if not zgodne:
+                    ma_roznice = True
+                wiersze.append({
+                    "SKU": sku, "Sklep": s["sklep"],
+                    "Status": "✅ ZGODNE" if zgodne else "🔴 RÓŻNICA",
+                    "Pole": "Dostępność",
+                    "Na stronie (netto)": s_d or "brak", "W pliku (netto)": f_d,
+                })
 
         if sprawdz_daty:
             for pole, fv, sv in (("Data od", r.get("Data od"), s["date_from"]),
@@ -754,6 +802,7 @@ def pobierz_audyt_ze_sklepu(sklep_nazwa):
             "attrs": len(o.get("attributes") or []),
             "weight": str(o.get("weight") or "").strip(),
             "dims": o.get("dimensions") or {},
+            "dostepnosc": _wyciag_dostepnosc(o),
         }
 
     wpisy, zmienne = [], []
@@ -808,6 +857,11 @@ def audyt_kompletnosci(wpisy, cfg):
         spr(e["attrs"] == 0,               "brak atrybutów",         "O", cfg["atrybuty"] and tresc)
         spr(e["status"] != "publish",      f"status: {e['status']}", "K",
             cfg["status"] and tresc)
+        # dostępność: brak kodu albo kod spoza A/B/C/I
+        dost = e.get("dostepnosc", "")
+        spr(dost not in KODY_DOSTEPNOSCI,
+            "brak oznaczenia dostępności" if not dost else f"niedozwolony kod dostępności: {dost}",
+            "O", cfg.get("dostepnosc") and cena)
 
         ok = run - len(braki)
         proc = round(100 * ok / run) if run else 100
@@ -885,6 +939,7 @@ def tryb_audyt(wybrane_sklepy):
     cfg["omnibus"]    = c[2].checkbox("Omnibus w promocji", True)
     cfg["atrybuty"]   = c[2].checkbox("Atrybuty", False)
     cfg["status"]     = c[3].checkbox("Status publikacji", True)
+    cfg["dostepnosc"] = c[3].checkbox("Dostępność (A/B/C/I)", True)
     cfg["prog_opis"]  = c[3].number_input("Min. długość opisu (zn.)", value=200, step=50, min_value=0)
 
     if st.button("▶️ Uruchom audyt", type="primary"):
@@ -944,7 +999,7 @@ def _fmt_cena(v):
 # Kolumny pliku wynikowego — dokładnie format cennika klienta (kolejność ma znaczenie)
 KOLUMNY_EKSPORT = ["ID", "Title", "Parent Product ID", "Product Type", "SKU", "Price",
                    "Regular Price", "Sale Price", "_price-omnibus",
-                   "Sale Price Dates From", "Sale Price Dates To"]
+                   "Sale Price Dates From", "Sale Price Dates To", "Dostepnosc"]
 
 
 @st.cache_data(ttl=300, show_spinner=False)
@@ -1013,7 +1068,8 @@ def pobierz_do_eksportu(sklep_nazwa):
                 "price": num(o.get("price")), "regular": num(o.get("regular_price")),
                 "sale": num(o.get("sale_price")), "omnibus": omni(o),
                 "on_sale": bool(o.get("on_sale")), "date_from": o.get("date_on_sale_from"),
-                "date_to": o.get("date_on_sale_to"), "ean": _wyciag_ean_para(o)[0]}
+                "date_to": o.get("date_on_sale_to"), "ean": _wyciag_ean_para(o)[0],
+                "dostepnosc": _wyciag_dostepnosc(o)}
 
     wpisy, zmienne = [], []
     for p in fetch_all("products", POLA):
@@ -1076,7 +1132,8 @@ def policz_zmiany(plik_df, sku_map, plik_basis, tryb, vat):
 
         s = sku_map[sku]
         final = {"regular": s["regular"], "sale": s["sale"], "omnibus": s["omnibus"],
-                 "date_from": norm_date(s["date_from"]), "date_to": norm_date(s["date_to"])}
+                 "date_from": norm_date(s["date_from"]), "date_to": norm_date(s["date_to"]),
+                 "dostepnosc": s.get("dostepnosc", "")}
         backup = dict(final)
         zmiana = False
 
@@ -1113,6 +1170,18 @@ def policz_zmiany(plik_df, sku_map, plik_basis, tryb, vat):
             final["date_from"] = ""
             final["date_to"] = ""
 
+        # dostępność (tekst A/B/C/I) — puste w pliku zostawia wartość obecną,
+        # niedozwolony kod jest ignorowany (nie psujemy danych w sklepie)
+        nd_dost = str(r.get("Dostępność") or "").strip().upper()
+        if nd_dost and nd_dost not in ("NAN", "NONE") and nd_dost in KODY_DOSTEPNOSCI:
+            cur_dost = s.get("dostepnosc", "")
+            final["dostepnosc"] = nd_dost
+            if nd_dost != cur_dost:
+                zmiana = True
+                display.append({"SKU": sku, "Pole": "Dostępność",
+                                "Obecna (netto)": cur_dost or "brak",
+                                "Nowa (netto)": nd_dost, "Status": "🟠 ZMIANA"})
+
         if zmiana:
             final_map[sku] = final
             backup_map[sku] = backup
@@ -1139,24 +1208,25 @@ def zbuduj_csv_wlasny(values_map, wpisy):
         else:
             proste.append((e, vals))
 
-    def wiersz(idv, title, parent, sku, price, reg, sale, omn, d1, d2):
+    def wiersz(idv, title, parent, sku, price, reg, sale, omn, d1, d2, dost=""):
         return {"ID": idv, "Title": title, "Parent Product ID": parent, "Product Type": idv,
                 "SKU": sku, "Price": price, "Regular Price": reg, "Sale Price": sale,
-                "_price-omnibus": omn, "Sale Price Dates From": d1, "Sale Price Dates To": d2}
+                "_price-omnibus": omn, "Sale Price Dates From": d1, "Sale Price Dates To": d2,
+                "Dostepnosc": dost}
 
     def prod(e, vals, title):
         aktywna = vals.get("sale") if vals.get("sale") is not None else vals.get("regular")
         return wiersz(e["id"], title, e["parent_id"] or 0, e["sku"], _fmt_cena(aktywna),
                       _fmt_cena(vals.get("regular")), _fmt_cena(vals.get("sale")),
                       _fmt_cena(vals.get("omnibus")), vals.get("date_from") or "",
-                      vals.get("date_to") or "")
+                      vals.get("date_to") or "", vals.get("dostepnosc") or "")
 
     rows = []
     for pid in sorted(grupy, key=lambda x: int(x)):
         p = by_id.get(pid)
         if p:                                         # wiersz Parent (seria) przed wariantami
             rows.append(wiersz(p["id"], p["name"], 0, "", _fmt_cena(p.get("price")),
-                               "", "", "", "", ""))
+                               "", "", "", "", "", ""))
         for e, vals in sorted(grupy[pid], key=lambda t: int(t[0]["id"])):
             rows.append(prod(e, vals, p["name"] if p else e["name"]))
     for e, vals in sorted(proste, key=lambda t: int(t[0]["id"])):
