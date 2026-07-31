@@ -47,7 +47,7 @@ import streamlit as st
 # KONFIGURACJA STRONY
 # ===========================================================================
 
-WERSJA = "1.6"
+WERSJA = "1.7"
 AUTOR = "B. Kokoszanek · Schedpol"
 LOGO = os.path.join(os.path.dirname(os.path.abspath(__file__)), "logo.png")
 
@@ -999,7 +999,7 @@ def _fmt_cena(v):
 # Kolumny pliku wynikowego — dokładnie format cennika klienta (kolejność ma znaczenie)
 KOLUMNY_EKSPORT = ["ID", "Title", "Parent Product ID", "Product Type", "SKU", "Price",
                    "Regular Price", "Sale Price", "_price-omnibus",
-                   "Sale Price Dates From", "Sale Price Dates To", "Dostepnosc"]
+                   "Sale Price Dates From", "Sale Price Dates To", "_dostepnosc_magazynowa"]
 
 
 @st.cache_data(ttl=300, show_spinner=False)
@@ -1212,7 +1212,7 @@ def zbuduj_csv_wlasny(values_map, wpisy):
         return {"ID": idv, "Title": title, "Parent Product ID": parent, "Product Type": idv,
                 "SKU": sku, "Price": price, "Regular Price": reg, "Sale Price": sale,
                 "_price-omnibus": omn, "Sale Price Dates From": d1, "Sale Price Dates To": d2,
-                "Dostepnosc": dost}
+                "_dostepnosc_magazynowa": dost}
 
     def prod(e, vals, title):
         aktywna = vals.get("sale") if vals.get("sale") is not None else vals.get("regular")
