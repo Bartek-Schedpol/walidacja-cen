@@ -47,7 +47,7 @@ import streamlit as st
 # KONFIGURACJA STRONY
 # ===========================================================================
 
-WERSJA = "1.8"
+WERSJA = "1.9"
 AUTOR = "B. Kokoszanek · Schedpol"
 LOGO = os.path.join(os.path.dirname(os.path.abspath(__file__)), "logo.png")
 
@@ -448,6 +448,37 @@ def lista_arkuszy(uploaded):
         uploaded.seek(0)
 
 
+def litera_kolumny(i):
+    """Excelowa litera kolumny dla indeksu 0-based: 0->A, 25->Z, 26->AA."""
+    s = ""
+    i += 1
+    while i:
+        i, r = divmod(i - 1, 26)
+        s = chr(65 + r) + s
+    return s
+
+
+def etykiety_kolumn(df):
+    """Mapa {nazwa kolumny: 'O — nazwa kolumny'} — litera pozwala odróżnić
+    kolumny o identycznych nagłówkach (pandas dopisuje im .1, .2 ...)."""
+    return {nazwa: f"{litera_kolumny(i)} — {nazwa}" for i, nazwa in enumerate(df.columns)}
+
+
+def raport_odrzuconych_dostepnosci(surowy, mapowanie):
+    """Informuje, ile komórek dostępności ma wartość spoza A/B/C/I
+    (są traktowane jak puste, więc nie trafiają do sklepu)."""
+    kol = mapowanie.get("Dostępność", "—")
+    if kol == "—" or kol not in surowy.columns:
+        return
+    s = surowy[kol].astype(str).str.strip().str.upper()
+    niepuste = s[~s.isin(["", "NAN", "NONE"])]
+    zle = niepuste[~niepuste.isin(KODY_DOSTEPNOSCI)]
+    if len(zle):
+        przyklady = ", ".join(f"„{w}” ({n})" for w, n in zle.value_counts().head(4).items())
+        st.caption(f"ℹ️ Dostępność: {len(zle)} komórek ma wartość spoza A/B/C/I — "
+                   f"potraktowane jak puste. Najczęstsze: {przyklady}")
+
+
 def sygnatura_kolumn(df):
     """Krótki, stabilny podpis zestawu kolumn — do kluczy widgetów mapowania,
     żeby nowy plik/układ kolumn wymusił świeże auto-mapowanie (a nie stan z poprzedniego)."""
@@ -542,9 +573,14 @@ def normalizuj(df, mapowanie):
     out["Data od"] = df[m["Data od"]] if "Data od" in m else None
     out["Data do"] = df[m["Data do"]] if "Data do" in m else None
     out["EAN"] = df[m["EAN"]].astype(str).str.strip() if "EAN" in m else None
-    # dostępność: pole tekstowe A/B/C/I — normalizujemy do wielkich liter
-    out["Dostępność"] = (df[m["Dostępność"]].astype(str).str.strip().str.upper()
-                         if "Dostępność" in m else None)
+    # dostępność: pole tekstowe A/B/C/I. Wartości spoza tego zbioru (np. opisy
+    # typu „C - realizacja 4-6 tyg.” czy „do wyczerpania zapasów”) traktujemy
+    # jak PUSTE — nie trafiają do sklepu i nie kasują tego, co tam jest.
+    if "Dostępność" in m:
+        d = df[m["Dostępność"]].astype(str).str.strip().str.upper()
+        out["Dostępność"] = d.where(d.isin(KODY_DOSTEPNOSCI), None)
+    else:
+        out["Dostępność"] = None
 
     # prawdziwy kod produktu: niepusty, bez spacji, rozsądnej długości.
     # Odsiewa wiersze-nagłówki/legendy (np. "ORIENTACYJNA DOSTĘPNOŚĆ...").
@@ -1260,6 +1296,7 @@ def tryb_eksport_zmian(dostepne_sklepy):
     sig = sygnatura_kolumn(surowy)   # klucz zależny od pliku -> nowy plik = świeże auto-mapowanie
     auto = auto_mapowanie(list(surowy.columns))
     opcje = ["—"] + list(surowy.columns)
+    etyk = etykiety_kolumn(surowy)   # litery kolumn (A, B, C…) w podpowiedzi
     mapowanie = {}
     kol_ui = st.columns(3)
     for i, pole in enumerate(POLA):
@@ -1267,10 +1304,12 @@ def tryb_eksport_zmian(dostepne_sklepy):
             dom = auto.get(pole)
             idx = opcje.index(dom) if dom in opcje else 0
             mapowanie[pole] = st.selectbox(ETYKIETY.get(pole, pole), opcje, index=idx,
-                                           key=f"impmap_{pole}_{sig}")
+                                           key=f"impmap_{pole}_{sig}",
+                                           format_func=lambda x: etyk.get(x, x))
     if mapowanie.get("SKU", "—") == "—":
         st.error("Wskaż kolumnę SKU — bez niej nie ma jak dopasować produktów.")
         return
+    raport_odrzuconych_dostepnosci(surowy, mapowanie)
 
     plik_df = normalizuj(surowy, mapowanie)
     plik_basis = st.radio("Ceny w pliku podane jako", ["netto", "brutto"], index=0,
@@ -1462,10 +1501,12 @@ def main():
 
     # --- mapowanie kolumn ---
     st.subheader("🧩 Mapowanie kolumn")
-    st.caption("Auto-wykryte poniżej — popraw, jeśli któraś kolumna została źle dopasowana. Myślnik (—) oznacza: pomiń pole.")
+    st.caption("Auto-wykryte poniżej — popraw, jeśli któraś kolumna została źle dopasowana. "
+               "Przed nazwą podana jest litera kolumny z arkusza. Myślnik (—) oznacza: pomiń pole.")
     sig = sygnatura_kolumn(surowy)   # klucz zależny od pliku -> nowy plik = świeże auto-mapowanie
     auto = auto_mapowanie(list(surowy.columns))
     opcje = ["—"] + list(surowy.columns)
+    etyk = etykiety_kolumn(surowy)   # litery kolumn (A, B, C…) w podpowiedzi
     mapowanie = {}
     kolumny_ui = st.columns(3)
     for i, pole in enumerate(POLA):
@@ -1473,7 +1514,9 @@ def main():
             dom = auto.get(pole)
             idx = opcje.index(dom) if dom in opcje else 0
             mapowanie[pole] = st.selectbox(ETYKIETY.get(pole, pole), opcje, index=idx,
-                                           key=f"map_{pole}_{sig}")
+                                           key=f"map_{pole}_{sig}",
+                                           format_func=lambda x: etyk.get(x, x))
+    raport_odrzuconych_dostepnosci(surowy, mapowanie)
 
     if mapowanie.get("SKU", "—") == "—":
         st.error("Musisz wskazać kolumnę SKU — bez niej nie ma jak dopasować produktów.")
